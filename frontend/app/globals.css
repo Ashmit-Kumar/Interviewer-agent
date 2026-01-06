@@ -1,1 +1,17 @@
 @import "tailwindcss";
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-white antialiased;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-slate-900/50 backdrop-blur-sm border border-slate-800 rounded-lg shadow-xl;
+  }
+  
+  .glass-panel-light {
+    @apply bg-slate-800/30 backdrop-blur-md border border-slate-700/50 rounded-lg;
+  }
+}
