@@ -1,91 +1,219 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import Vapi from "@vapi-ai/web";
 import CodeEditor from "@/components/code-editor/CodeEditor";
 import TranscriptPanel from "@/components/transcript/TranscriptPanel";
 import VoiceAgentPanel from "@/components/voice-agent/VoiceAgentPanel";
 import InterviewHeader from "@/components/interview/InterviewHeader";
+import { sessionApi } from "@/lib/api/sessionApi";
 
-const INITIAL_CODE = `// Solve the Two Sum problem
-// Given an array of integers nums and an integer target,
-// return indices of the two numbers such that they add up to target.
+const INITIAL_CODE = `// Write your solution here\n\nfunction solution() {\n  // Your code\n}\n`;
 
-function twoSum(nums, target) {
-  // Write your solution here
-  
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: Date;
 }
-
-// Test cases
-console.log(twoSum([2,7,11,15], 9)); // [0,1]
-console.log(twoSum([3,2,4], 6)); // [1,2]`;
 
 export default function InterviewPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const sessionId = searchParams.get("sessionId");
+  
   const [code, setCode] = useState(INITIAL_CODE);
   const [currentQuestion, setCurrentQuestion] = useState({
-    title: "Two Sum",
-    difficulty: "Easy",
-    description: "Given an array of integers 'nums' and an integer 'target', return indices of the two numbers such that they add up to target. You may assume that each input would have exactly one solution, and you may not use the same element twice.",
-    constraints: [
-      "2 ≤ nums.length ≤ 10⁴",
-      "-10⁹ ≤ nums[i] ≤ 10⁹",
-      "-10⁹ ≤ target ≤ 10⁹",
-      "Only one valid answer exists"
-    ]
+    title: "",
+    difficulty: "",
+    description: "",
+    constraints: [] as string[]
   });
   const [isMuted, setIsMuted] = useState(false);
-  const [isCallActive, setIsCallActive] = useState(true);
+  const [isCallActive, setIsCallActive] = useState(false);
   const [isEnding, setIsEnding] = useState(false);
-  const [agentState, setAgentState] = useState<"idle" | "listening" | "speaking">("listening");
-  const [messages, setMessages] = useState([
-    {
-      id: "1",
-      role: "assistant" as const,
-      content: "Hello! I'm your AI interviewer today. Let's start with the Two Sum problem. Take a moment to read it, and let me know when you're ready to discuss your approach.",
-      timestamp: new Date(),
-    },
-    {
-      id: "2",
-      role: "user" as const,
-      content: "I think I can use a hash map to solve this efficiently...",
-      timestamp: new Date(),
-    },
-    {
-      id: "3",
-      role: "assistant" as const,
-      content: "Great! Can you explain your approach step by step?",
-      timestamp: new Date(),
-    },
-  ]);
+  const [agentState, setAgentState] = useState<"idle" | "listening" | "speaking">("idle");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  
+  const vapiRef = useRef<Vapi | null>(null);
+  const autosaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Load session data from sessionStorage and initialize Vapi
+  useEffect(() => {
+    if (!sessionId) {
+      setError("No session ID provided");
+      setIsLoading(false);
+      return;
+    }
+
+    try {
+      const sessionDataStr = sessionStorage.getItem('currentSession');
+      if (!sessionDataStr) {
+        setError("Session data not found");
+        setIsLoading(false);
+        return;
+      }
+
+      const sessionData = JSON.parse(sessionDataStr);
+      
+      // Set question data
+      setCurrentQuestion(sessionData.question);
+      
+      // Initialize Vapi client
+      const vapi = new Vapi(sessionData.vapiConfig.publicKey);
+      vapiRef.current = vapi;
+
+      // Set up Vapi event listeners
+      vapi.on("call-start", () => {
+        console.log("Call started");
+        setIsCallActive(true);
+        setAgentState("listening");
+      });
+
+      vapi.on("call-end", () => {
+        console.log("Call ended");
+        setIsCallActive(false);
+        setAgentState("idle");
+      });
+
+      vapi.on("speech-start", () => {
+        setAgentState("speaking");
+      });
+
+      vapi.on("speech-end", () => {
+        setAgentState("listening");
+      });
+
+      vapi.on("message", (message: any) => {
+        console.log("Vapi message:", message);
+        
+        if (message.type === "transcript" && message.transcript) {
+          const newMessage: Message = {
+            id: Date.now().toString(),
+            role: message.role === "assistant" ? "assistant" : "user",
+            content: message.transcript,
+            timestamp: new Date(),
+          };
+          setMessages((prev) => [...prev, newMessage]);
+        }
+      });
+
+      vapi.on("error", (error: any) => {
+        console.error("Vapi error:", error);
+        setError("Voice agent error occurred");
+      });
+
+      // Start the call
+      vapi.start(sessionData.vapiConfig.agentId, {
+        metadata: sessionData.vapiConfig.metadata,
+      });
+
+      setIsLoading(false);
+    } catch (err) {
+      console.error("Failed to initialize interview:", err);
+      setError("Failed to initialize interview");
+      setIsLoading(false);
+    }
+
+    // Cleanup on unmount
+    return () => {
+      if (vapiRef.current) {
+        vapiRef.current.stop();
+      }
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+      }
+    };
+  }, [sessionId]);
+
+  // Auto-save code with debounce
+  const saveCode = useCallback(async (codeToSave: string) => {
+    if (!sessionId) return;
+    
+    try {
+      await sessionApi.updateCode(sessionId, codeToSave);
+      console.log("Code auto-saved");
+    } catch (error) {
+      console.error("Failed to save code:", error);
+    }
+  }, [sessionId]);
 
   const handleCodeChange = (newCode: string) => {
     setCode(newCode);
-    // TODO: Implement autosave to backend
+    
+    // Debounce autosave
+    if (autosaveTimerRef.current) {
+      clearTimeout(autosaveTimerRef.current);
+    }
+    
+    autosaveTimerRef.current = setTimeout(() => {
+      saveCode(newCode);
+    }, 2000); // Save after 2 seconds of inactivity
   };
 
   const handleToggleMute = () => {
-    setIsMuted(!isMuted);
-    // TODO: Integrate with Vapi
+    if (vapiRef.current) {
+      vapiRef.current.setMuted(!isMuted);
+      setIsMuted(!isMuted);
+    }
   };
 
   const handleEndCall = async () => {
+    if (!sessionId) return;
+    
     setIsEnding(true);
     setIsCallActive(false);
     
     try {
-      // TODO: Save final code to backend
-      // await sessionApi.endSession(sessionId, code);
+      // Stop Vapi call
+      if (vapiRef.current) {
+        vapiRef.current.stop();
+      }
       
-      // Simulate backend processing
-      await new Promise(resolve => setTimeout(resolve, 2000));
+      // Save final code and end session
+      await sessionApi.updateCode(sessionId, code);
+      await sessionApi.endSession(sessionId);
       
-      router.push("/results");
+      // Navigate to results page
+      router.push(`/results?sessionId=${sessionId}`);
     } catch (error) {
       console.error("Failed to end session:", error);
+      setError("Failed to end session");
       setIsEnding(false);
     }
   };
+
+  // Show loading state
+  if (isLoading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gradient-to-br from-[#0f172a] via-[#111827] to-[#0f172a]">
+        <div className="text-center">
+          <div className="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+          <p className="text-slate-400">Initializing interview...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Show error state
+  if (error) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-gradient-to-br from-[#0f172a] via-[#111827] to-[#0f172a]">
+        <div className="text-center">
+          <p className="text-red-400 mb-4">{error}</p>
+          <button
+            onClick={() => router.push("/")}
+            className="px-6 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg"
+          >
+            Go Back
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen flex flex-col bg-gradient-to-br from-[#0f172a] via-[#111827] to-[#0f172a]">

@@ -14,12 +14,14 @@ export default function Home() {
     setError(null);
     
     try {
-      // TODO: Uncomment when backend is ready
-      // const session = await sessionApi.startSession();
-      // router.push(`/interview?sessionId=${session.sessionId}`);
+      // Call backend to start session
+      const response = await sessionApi.startSession();
       
-      // For now, navigate directly
-      router.push("/interview");
+      // Store session data in sessionStorage for interview page
+      sessionStorage.setItem('currentSession', JSON.stringify(response.data));
+      
+      // Navigate to interview page with session ID
+      router.push(`/interview?sessionId=${response.data.sessionId}`);
     } catch (err) {
       console.error("Failed to start interview:", err);
       setError("Failed to start interview. Please try again.");
