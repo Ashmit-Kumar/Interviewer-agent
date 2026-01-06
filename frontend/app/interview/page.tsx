@@ -222,31 +222,31 @@ export default function InterviewPage() {
               </div>
             </div>
             
-            {/* Transcription Content - Chat Style */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-0">
+            {/* Transcription Content - Inline with proper overflow */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
               {messages.length === 0 ? (
-                <div className="text-center text-slate-500 text-sm mt-8">
-                  AI is analyzing...
-                </div>
+              <div className="text-center text-slate-500 text-sm mt-8">
+                AI is analyzing...
+              </div>
               ) : (
-                <>
-                  {messages.map((message) => (
-                    <div key={message.id} className="space-y-2">
-                      <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">
-                        {message.role === "assistant" ? "AI Interviewer" : "You"}
-                      </div>
-                      <div
-                        className={`p-3 rounded-xl text-sm max-w-[85%] ${
-                          message.role === "assistant"
-                            ? "bg-blue-500/10 border border-blue-500/20 rounded-bl-none text-blue-100"
-                            : "bg-slate-700/30 border border-slate-600/30 rounded-br-none text-slate-200 ml-auto"
-                        }`}
-                      >
-                        {message.content}
-                      </div>
-                    </div>
-                  ))}
-                </>
+              <>
+                {messages.map((message) => (
+                <div key={message.id} className="space-y-2">
+                  <div className="text-[10px] uppercase tracking-wider text-slate-500 font-bold">
+                  {message.role === "assistant" ? "AI Interviewer" : "You"}
+                  </div>
+                  <div
+                  className={`p-3 rounded-xl text-sm max-w-[85%] ${
+                    message.role === "assistant"
+                    ? "bg-blue-500/10 border border-blue-500/20 rounded-bl-none text-blue-100"
+                    : "bg-slate-700/30 border border-slate-600/30 rounded-br-none text-slate-200 ml-auto"
+                  }`}
+                  >
+                  {message.content}
+                  </div>
+                </div>
+                ))}
+              </>
               )}
             </div>
 
