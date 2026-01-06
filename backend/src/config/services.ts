@@ -1,3 +1,6 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 export const vapiConfig = {
   privateKey: process.env.VAPI_PRIVATE_KEY || '',
   publicKey: process.env.VAPI_PUBLIC_KEY || '',

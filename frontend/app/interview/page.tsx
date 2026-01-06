@@ -62,6 +62,21 @@ export default function InterviewPage() {
       // Set question data
       setCurrentQuestion(sessionData.question);
       
+      // Log configuration for debugging
+      console.log("Vapi Config:", {
+        publicKey: sessionData.vapiConfig.publicKey,
+        agentId: sessionData.vapiConfig.agentId,
+        metadata: sessionData.vapiConfig.metadata
+      });
+      
+      // Validate keys are present
+      if (!sessionData.vapiConfig.publicKey) {
+        throw new Error("Vapi public key is missing");
+      }
+      if (!sessionData.vapiConfig.agentId) {
+        throw new Error("Vapi agent ID is missing");
+      }
+      
       // Initialize Vapi client
       const vapi = new Vapi(sessionData.vapiConfig.publicKey);
       vapiRef.current = vapi;
@@ -102,14 +117,28 @@ export default function InterviewPage() {
       });
 
       vapi.on("error", (error: any) => {
-        console.error("Vapi error:", error);
-        setError("Voice agent error occurred");
+        console.error("Vapi error details:", JSON.stringify(error, null, 2));
+        console.error("Error type:", typeof error);
+        console.error("Error keys:", Object.keys(error));
+        // Don't set error state immediately - might just be a warning
       });
 
-      // Start the call
-      vapi.start(sessionData.vapiConfig.agentId, {
-        metadata: sessionData.vapiConfig.metadata,
-      });
+      // Start the call with proper error handling
+      try {
+        console.log("Starting Vapi call with assistantId:", sessionData.vapiConfig.agentId);
+        vapi.start(sessionData.vapiConfig.agentId, {
+          variableValues: {
+            sessionId: sessionData.vapiConfig.metadata.sessionId,
+            agentContext: sessionData.vapiConfig.metadata.agentContext
+          }
+        });
+        console.log("Vapi call initiated");
+      } catch (startError: any) {
+        console.error("Failed to start Vapi call:", startError);
+        setError(`Voice agent failed to start: ${startError.message || 'Unknown error'}`);
+        setIsLoading(false);
+        return;
+      }
 
       setIsLoading(false);
     } catch (err) {
