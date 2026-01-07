@@ -149,3 +149,6 @@ Encourage them to explain their approach before coding.
     `.trim();
   }
 }
+
+// Export singleton instance
+export const interviewOrchestrator = new InterviewOrchestrator();

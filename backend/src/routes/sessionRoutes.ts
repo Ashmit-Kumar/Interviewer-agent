@@ -1,8 +1,7 @@
 import { Router } from 'express';
-import { SessionController } from '../controllers/sessionController';
+import { sessionController } from '../controllers/sessionController';
 
 const router = Router();
-const sessionController = new SessionController();
 
 // Start a new interview session
 router.post('/start', sessionController.startSession);

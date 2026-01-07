@@ -1,31 +1,21 @@
 import { Request, Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import { SessionRepository } from '../repositories/sessionRepository';
-import { InterviewOrchestrator } from '../services/interview-orchestrator/interviewOrchestrator';
-import { EvaluationService } from '../services/evaluation/evaluationService';
+import { sessionRepository } from '../repositories/sessionRepository';
+import { interviewOrchestrator } from '../services/interview-orchestrator/interviewOrchestrator';
+import { evaluationService } from '../services/evaluation/evaluationService';
 import { ApiError } from '../middlewares/errorHandler';
 import { vapiConfig } from '../config/services';
 
 export class SessionController {
-  private sessionRepo: SessionRepository;
-  private orchestrator: InterviewOrchestrator;
-  private evaluationService: EvaluationService;
-
-  constructor() {
-    this.sessionRepo = new SessionRepository();
-    this.orchestrator = new InterviewOrchestrator();
-    this.evaluationService = new EvaluationService();
-  }
-
   startSession = async (_req: Request, res: Response, next: NextFunction) => {
     try {
       const sessionId = uuidv4();
 
       // Initialize interview orchestrator
-      const { question, agentContext } = await this.orchestrator.initializeInterview(sessionId);
+      const { question, agentContext } = await interviewOrchestrator.initializeInterview(sessionId);
 
       // Create session in MongoDB
-      await this.sessionRepo.create({
+      await sessionRepository.create({
         sessionId,
         status: 'active',
         questionsAsked: [question.title],
@@ -68,7 +58,7 @@ export class SessionController {
         throw new ApiError(400, 'Code is required');
       }
 
-      const session = await this.sessionRepo.updateCode(sessionId, code);
+      const session = await sessionRepository.updateCode(sessionId, code);
 
       if (!session) {
         throw new ApiError(404, 'Session not found');
@@ -88,14 +78,14 @@ export class SessionController {
       const { sessionId } = req.params;
 
       // End session in database
-      const session = await this.sessionRepo.endSession(sessionId);
+      const session = await sessionRepository.endSession(sessionId);
 
       if (!session) {
         throw new ApiError(404, 'Session not found');
       }
 
       // Complete interview in orchestrator (cleanup Redis)
-      await this.orchestrator.completeInterview(sessionId);
+      await interviewOrchestrator.completeInterview(sessionId);
 
       // Trigger evaluation asynchronously
       this.runEvaluation(sessionId).catch((error) => {
@@ -116,7 +106,7 @@ export class SessionController {
     try {
       const { sessionId } = req.params;
 
-      const session = await this.sessionRepo.findBySessionId(sessionId);
+      const session = await sessionRepository.findBySessionId(sessionId);
 
       if (!session) {
         throw new ApiError(404, 'Session not found');
@@ -152,20 +142,25 @@ export class SessionController {
 
   private async runEvaluation(sessionId: string): Promise<void> {
     try {
-      const session = await this.sessionRepo.findBySessionId(sessionId);
+      const session = await sessionRepository.findBySessionId(sessionId);
       if (!session) return;
 
-      const evaluation = await this.evaluationService.evaluateInterview(
+      const evaluation = await evaluationService.evaluateInterview(
         session.finalCode,
         session.transcripts,
         session.questionsAsked
       );
 
-      await this.sessionRepo.updateEvaluation(sessionId, evaluation);
+      await sessionRepository.updateEvaluation(sessionId, evaluation);
 
       console.log(`✓ Evaluation completed for session ${sessionId}`);
+      console.log('--- Evaluation Result ---');
+      console.log(JSON.stringify(evaluation, null, 2));
+      console.log('------------------------');
     } catch (error) {
       console.error(`Failed to evaluate session ${sessionId}:`, error);
     }
   }
 }
+
+export const sessionController = new SessionController();

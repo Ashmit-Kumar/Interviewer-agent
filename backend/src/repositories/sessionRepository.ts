@@ -23,7 +23,7 @@ export class SessionRepository {
     try {
       return await Session.findOneAndUpdate(
         { sessionId },
-        { finalCode: code },
+        { $set: { finalCode: code } },
         { new: true }
       );
     } catch (error) {
@@ -31,36 +31,11 @@ export class SessionRepository {
     }
   }
 
-  async addTranscript(
-    sessionId: string,
-    transcript: { role: 'user' | 'assistant'; content: string }
-  ): Promise<ISession | null> {
-    try {
-      return await Session.findOneAndUpdate(
-        { sessionId },
-        {
-          $push: {
-            transcripts: {
-              ...transcript,
-              timestamp: new Date(),
-            },
-          },
-        },
-        { new: true }
-      );
-    } catch (error) {
-      throw new ApiError(500, 'Failed to add transcript');
-    }
-  }
-
   async endSession(sessionId: string): Promise<ISession | null> {
     try {
       return await Session.findOneAndUpdate(
         { sessionId },
-        {
-          status: 'ended',
-          endedAt: new Date(),
-        },
+        { $set: { status: 'ended', endedAt: new Date() } },
         { new: true }
       );
     } catch (error) {
@@ -68,29 +43,28 @@ export class SessionRepository {
     }
   }
 
-  async updateEvaluation(
-    sessionId: string,
-    evaluation: {
-      strengths: string[];
-      improvements: string[];
-      edgeCases: string[];
-      nextSteps: string[];
-    }
-  ): Promise<ISession | null> {
+  async updateEvaluation(sessionId: string, evaluation: any): Promise<ISession | null> {
     try {
       return await Session.findOneAndUpdate(
         { sessionId },
-        {
-          status: 'evaluated',
-          evaluation: {
-            ...evaluation,
-            generatedAt: new Date(),
-          },
-        },
+        { $set: { evaluation } },
         { new: true }
       );
     } catch (error) {
       throw new ApiError(500, 'Failed to update evaluation');
     }
   }
+
+  async addTranscript(sessionId: string, transcript: any): Promise<void> {
+    try {
+      await Session.findOneAndUpdate(
+        { sessionId },
+        { $push: { transcripts: transcript } }
+      );
+    } catch (error) {
+      throw new ApiError(500, 'Failed to add transcript');
+    }
+  }
 }
+
+export const sessionRepository = new SessionRepository();

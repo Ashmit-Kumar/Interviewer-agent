@@ -1,121 +1,164 @@
 import { Request, Response, NextFunction } from 'express';
-import { SessionRepository } from '../repositories/sessionRepository';
-import { InterviewOrchestrator } from '../services/interview-orchestrator/interviewOrchestrator';
-import { ApiError } from '../middlewares/errorHandler';
+import { interviewOrchestrator } from '../services/interview-orchestrator/interviewOrchestrator';
+import { sessionRepository } from '../repositories/sessionRepository';
 
 export class VapiController {
-  private sessionRepo: SessionRepository;
-  private orchestrator: InterviewOrchestrator;
-
-  constructor() {
-    this.sessionRepo = new SessionRepository();
-    this.orchestrator = new InterviewOrchestrator();
-  }
-
-  handleWebhook = async (req: Request, res: Response, next: NextFunction) => {
+  async handleWebhook(req: Request, res: Response) {
     try {
+      console.log('🔔 Vapi webhook received:', JSON.stringify(req.body, null, 2));
+      
       const { message } = req.body;
 
-      // Vapi webhook events
-      if (message?.type === 'function-call') {
-        return this.handleFunctionCall(req, res, next);
+      if (!message) {
+        console.error('❌ No message in webhook payload');
+        return res.status(400).json({ error: 'Invalid webhook payload' });
       }
 
-      if (message?.type === 'transcript') {
-        return this.handleTranscript(req, res, next);
+      console.log('📋 Message type:', message.type);
+
+      // Handle function calls
+      if (message.type === 'function-call') {
+        const { functionCall } = message;
+        console.log('🔧 Function call:', functionCall.name);
+        console.log('📦 Parameters:', JSON.stringify(functionCall.parameters, null, 2));
+
+        let result;
+        switch (functionCall.name) {
+          case 'get_next_question':
+            result = await this.handleGetNextQuestion(functionCall.parameters);
+            break;
+          case 'record_explanation':
+            result = await this.handleRecordExplanation(functionCall.parameters);
+            break;
+          case 'ask_followup':
+            result = await this.handleAskFollowup(functionCall.parameters);
+            break;
+          case 'end_interview':
+            result = await this.handleEndInterview(functionCall.parameters);
+            break;
+          default:
+            console.error('❌ Unknown function:', functionCall.name);
+            return res.status(400).json({ error: 'Unknown function' });
+        }
+
+        console.log('✅ Function result:', JSON.stringify(result, null, 2));
+        return res.json({ result });
       }
 
-      if (message?.type === 'end-of-call-report') {
-        return this.handleEndOfCall(req, res, next);
+      // Handle transcripts
+      if (message.type === 'transcript') {
+        console.log('📝 Transcript:', message.transcript);
+        await this.saveTranscript(message);
+        return res.json({ success: true });
       }
 
-      // Acknowledge other events
-      res.status(200).json({ received: true });
+      // Handle end-of-call
+      if (message.type === 'end-of-call-report') {
+        console.log('📞 Call ended');
+        await this.handleCallEnd(message);
+        return res.json({ success: true });
+      }
+
+      console.log('ℹ️ Unhandled message type:', message.type);
+      res.json({ success: true });
     } catch (error) {
-      next(error);
+      console.error('💥 Webhook error:', error);
+      res.status(500).json({ error: 'Internal server error' });
     }
-  };
+  }
 
-  private handleFunctionCall = async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { functionCall, call } = req.body;
-      const sessionId = call?.metadata?.sessionId;
+  // Handler: Get next question
+  private async handleGetNextQuestion(params: { sessionId: string }) {
+    const { sessionId } = params;
+    const result = await interviewOrchestrator.getNextQuestion(sessionId);
+    
+    if (!result) {
+      return {
+        success: false,
+        message: 'No more questions available',
+      };
+    }
 
-      if (!sessionId) {
-        throw new ApiError(400, 'Session ID not found in call metadata');
-      }
+    return {
+      question: result.question.title,
+      description: result.question.description,
+      difficulty: result.question.difficulty,
+      constraints: result.question.constraints,
+    };
+  }
 
-      const functionName = functionCall?.name;
-      const parameters = functionCall?.parameters || {};
-
-      let result: any;
-
-      switch (functionName) {
-        case 'get_next_question':
-          result = await this.orchestrator.getNextQuestion(sessionId);
-          break;
-
-        case 'record_explanation':
-          await this.sessionRepo.addTranscript(sessionId, {
-            role: 'user',
-            content: parameters.explanation || '',
-          });
-          result = { success: true, message: 'Explanation recorded' };
-          break;
-
-        case 'ask_followup':
-          result = await this.orchestrator.handleFollowUp(sessionId, parameters.topic || '');
-          break;
-
-        case 'end_interview':
-          await this.orchestrator.completeInterview(sessionId);
-          result = { success: true, message: 'Interview ending' };
-          break;
-
-        default:
-          throw new ApiError(400, `Unknown function: ${functionName}`);
-      }
-
-      res.json({
-        result,
+  // Handler: Record explanation
+  private async handleRecordExplanation(params: { sessionId: string; explanation: string }) {
+    const { sessionId, explanation } = params;
+    
+    const session = await sessionRepository.findById(sessionId);
+    if (session) {
+      await sessionRepository.addTranscript(sessionId, {
+        role: 'assistant',
+        text: `Candidate explained: ${explanation}`,
+        timestamp: new Date(),
       });
-    } catch (error) {
-      next(error);
     }
-  };
+    
+    return {
+      success: true,
+      message: 'Explanation recorded',
+    };
+  }
 
-  private handleTranscript = async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { transcript, call } = req.body;
-      const sessionId = call?.metadata?.sessionId;
+  // Handler: Ask follow-up
+  private async handleAskFollowup(params: { sessionId: string; topic: string }) {
+    const { sessionId, topic } = params;
+    const context = await interviewOrchestrator.handleFollowUp(sessionId, topic);
+    
+    return {
+      context,
+      suggestion: `Probe deeper into ${topic}`,
+    };
+  }
 
-      if (sessionId && transcript) {
-        await this.sessionRepo.addTranscript(sessionId, {
-          role: transcript.role === 'assistant' ? 'assistant' : 'user',
-          content: transcript.text || '',
-        });
-      }
+  // Handler: End interview
+  private async handleEndInterview(params: { sessionId: string }) {
+    const { sessionId } = params;
+    
+    await interviewOrchestrator.completeInterview(sessionId);
+    await sessionRepository.update(sessionId, {
+      status: 'ended',
+      endedAt: new Date(),
+    });
+    
+    return {
+      success: true,
+      message: 'Interview ended successfully. Thank you for participating!',
+      action: 'end_call',
+    };
+  }
 
-      res.status(200).json({ received: true });
-    } catch (error) {
-      next(error);
+  // Helper: Save transcript
+  private async saveTranscript(message: any) {
+    const { sessionId, transcript, role, transcriptType } = message;
+    
+    if (transcriptType !== 'final') {
+      return;
     }
-  };
+    
+    await sessionRepository.addTranscript(sessionId, {
+      role: role || 'user',
+      text: transcript,
+      timestamp: new Date(),
+    });
+  }
 
-  private handleEndOfCall = async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { call } = req.body;
-      const sessionId = call?.metadata?.sessionId;
-
-      if (sessionId) {
-        // Ensure session is marked as ended
-        await this.sessionRepo.endSession(sessionId);
-        await this.orchestrator.completeInterview(sessionId);
-      }
-
-      res.status(200).json({ received: true });
-    } catch (error) {
-      next(error);
+  // Helper: Handle call end
+  private async handleCallEnd(message: any) {
+    const { sessionId } = message;
+    
+    if (sessionId) {
+      await interviewOrchestrator.completeInterview(sessionId);
+      await sessionRepository.update(sessionId, {
+        status: 'ended',
+        endedAt: new Date(),
+      });
     }
-  };
+  }
 }

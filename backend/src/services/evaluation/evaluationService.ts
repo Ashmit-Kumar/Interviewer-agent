@@ -1,6 +1,5 @@
 import Groq from 'groq-sdk';
 import { groqConfig } from '../../config/services';
-import { EvaluationResult } from '../../models/types';
 
 export class EvaluationService {
   private groq: Groq;
@@ -11,43 +10,34 @@ export class EvaluationService {
 
   async evaluateInterview(
     code: string,
-    transcripts: Array<{ role: string; content: string; timestamp: Date }>,
-    questions: string[]
-  ): Promise<EvaluationResult> {
+    transcripts: any[],
+    questionsAsked: string[]
+  ): Promise<any> {
     try {
-      const prompt = this.buildEvaluationPrompt(code, transcripts, questions);
+      const prompt = this.buildEvaluationPrompt(code, transcripts, questionsAsked);
 
       const completion = await this.groq.chat.completions.create({
         messages: [
           {
             role: 'system',
-            content: `You are an expert technical interviewer evaluating a coding interview session. 
-Provide structured, constructive feedback in JSON format with these exact fields:
-- strengths: array of strings describing what the candidate did well
-- improvements: array of strings suggesting areas for improvement  
-- edgeCases: array of strings listing edge cases the candidate missed
-- nextSteps: array of strings recommending next preparation steps
-
-Be specific, actionable, and encouraging. Focus on both technical skills and communication.`,
+            content: 'You are an expert technical interviewer providing constructive feedback on coding interviews.',
           },
           {
             role: 'user',
             content: prompt,
           },
         ],
-        model: groqConfig.model,
+        model: 'llama-3.3-70b-versatile', // Updated to supported model
         temperature: 0.3,
         max_tokens: 2000,
-        response_format: { type: 'json_object' },
       });
 
-      const result = completion.choices[0]?.message?.content;
-      if (!result) {
-        throw new Error('No evaluation generated');
+      const response = completion.choices[0]?.message?.content;
+      if (!response) {
+        throw new Error('No response from LLM');
       }
 
-      const evaluation = JSON.parse(result);
-      return this.validateEvaluation(evaluation);
+      return this.parseEvaluation(response);
     } catch (error) {
       console.error('Evaluation service error:', error);
       throw new Error('Failed to generate evaluation');
@@ -56,46 +46,81 @@ Be specific, actionable, and encouraging. Focus on both technical skills and com
 
   private buildEvaluationPrompt(
     code: string,
-    transcripts: Array<{ role: string; content: string; timestamp: Date }>,
-    questions: string[]
+    transcripts: any[],
+    questionsAsked: string[]
   ): string {
     const transcriptText = transcripts
-      .map((t) => `[${t.role.toUpperCase()}]: ${t.content}`)
+      .map((t) => `${t.role}: ${t.text}`)
       .join('\n');
 
     return `
-## Interview Session Evaluation
+You are evaluating a coding interview. Analyze the candidate's performance.
 
-### Questions Discussed:
-${questions.map((q, i) => `${i + 1}. ${q}`).join('\n')}
+**Questions Asked:**
+${questionsAsked.map((q, i) => `${i + 1}. ${q}`).join('\n')}
 
-### Final Code Submitted:
-\`\`\`javascript
-${code || '// No code submitted'}
+**Code Submitted:**
+\`\`\`
+${code || 'No code submitted'}
 \`\`\`
 
-### Interview Transcript:
+**Interview Transcript:**
 ${transcriptText || 'No transcript available'}
 
----
+**Provide evaluation in JSON format ONLY:**
 
-Evaluate this interview session comprehensively. Consider:
-1. Code quality, correctness, and efficiency
-2. Problem-solving approach and thought process
-3. Communication clarity and explanation quality
-4. Edge case handling and testing mindset
-5. Time/space complexity awareness
+{
+  "strengths": ["strength1", "strength2", "strength3"],
+  "improvements": ["improvement1", "improvement2", "improvement3"],
+  "missingEdgeCases": ["case1", "case2", "case3"],
+  "nextSteps": ["step1", "step2", "step3"]
+}
 
-Provide feedback in the specified JSON format.
+Be specific and actionable. Return ONLY valid JSON.
     `.trim();
   }
 
-  private validateEvaluation(evaluation: any): EvaluationResult {
-    return {
-      strengths: Array.isArray(evaluation.strengths) ? evaluation.strengths : [],
-      improvements: Array.isArray(evaluation.improvements) ? evaluation.improvements : [],
-      edgeCases: Array.isArray(evaluation.edgeCases) ? evaluation.edgeCases : [],
-      nextSteps: Array.isArray(evaluation.nextSteps) ? evaluation.nextSteps : [],
-    };
+  private parseEvaluation(response: string): any {
+    try {
+      // Remove markdown code blocks if present
+      let jsonString = response.trim();
+      jsonString = jsonString.replace(/```json\s*/g, '');
+      jsonString = jsonString.replace(/```\s*/g, '');
+      
+      // Try to extract JSON from response
+      const jsonMatch = jsonString.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        
+        // Validate structure
+        return {
+          strengths: Array.isArray(parsed.strengths) ? parsed.strengths : ['Participated in the interview'],
+          improvements: Array.isArray(parsed.improvements) ? parsed.improvements : ['Continue practicing'],
+          missingEdgeCases: Array.isArray(parsed.missingEdgeCases) ? parsed.missingEdgeCases : [],
+          nextSteps: Array.isArray(parsed.nextSteps) ? parsed.nextSteps : ['Keep coding regularly'],
+        };
+      }
+
+      // Fallback: parse as plain text
+      return {
+        strengths: ['Participated in the interview'],
+        improvements: ['Response parsing failed - manual review needed'],
+        missingEdgeCases: [],
+        nextSteps: ['Review the raw feedback'],
+        rawFeedback: response,
+      };
+    } catch (error) {
+      console.error('Failed to parse evaluation:', error);
+      return {
+        strengths: ['Completed the interview'],
+        improvements: ['Failed to parse evaluation - please review manually'],
+        missingEdgeCases: [],
+        nextSteps: ['Keep practicing'],
+        rawFeedback: response,
+      };
+    }
   }
 }
+
+// Export singleton instance
+export const evaluationService = new EvaluationService();
