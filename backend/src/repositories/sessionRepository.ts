@@ -1,3 +1,4 @@
+import mongoose from 'mongoose';
 import Session, { ISession } from '../models/Session';
 import { ApiError } from '../middlewares/errorHandler';
 
@@ -57,12 +58,22 @@ export class SessionRepository {
 
   async addTranscript(sessionId: string, transcript: any): Promise<void> {
     try {
-      await Session.findOneAndUpdate(
+      // Check if MongoDB is connected
+      if (mongoose.connection.readyState !== 1) {
+        throw new Error(`MongoDB not connected. State: ${mongoose.connection.readyState}`);
+      }
+
+      const result = await Session.findOneAndUpdate(
         { sessionId },
         { $push: { transcripts: transcript } },
         { new: true }
       );
+      
+      if (!result) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
     } catch (error) {
+      console.error('[SessionRepository] Error adding transcript:', error);
       throw new ApiError(500, 'Failed to add transcript');
     }
   }

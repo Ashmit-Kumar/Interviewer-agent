@@ -13,6 +13,8 @@ import {
 } from '@livekit/rtc-node';
 import { ElevenLabsClient } from 'elevenlabs';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
+import { connectDatabase } from '../../config/database';
+import { connectRedis } from '../../config/redis';
 import { interviewerAgent } from '../ai/interviewerAgent';
 import { sessionRepository } from '../../repositories/sessionRepository';
 import { livekitConfig } from '../../config/services';
@@ -26,6 +28,24 @@ async function main() {
 
   if (!roomName || !token || !sessionId) {
     console.error('Usage: node agent.js <roomName> <token> <sessionId>');
+    process.exit(1);
+  }
+
+  // Connect to MongoDB before using sessionRepository
+  try {
+    await connectDatabase();
+    console.log('✓ Agent connected to MongoDB');
+  } catch (error) {
+    console.error('❌ Agent failed to connect to MongoDB:', error);
+    process.exit(1);
+  }
+
+  // Connect to Redis before using interviewOrchestrator
+  try {
+    await connectRedis();
+    console.log('✓ Agent connected to Redis');
+  } catch (error) {
+    console.error('❌ Agent failed to connect to Redis:', error);
     process.exit(1);
   }
 
@@ -93,21 +113,43 @@ async function handleCandidateAudio(sessionId: string, track: RemoteTrack, room:
 
         try {
           // Save transcript
-          await sessionRepository.addTranscript(sessionId, {
-            role: 'user',
-            text: transcript,
-            timestamp: new Date(),
-          });
+          try {
+            await sessionRepository.addTranscript(sessionId, {
+              role: 'user',
+              content: transcript,
+              timestamp: new Date(),
+            });
+          } catch (dbError: unknown) {
+            const errorMsg = dbError instanceof Error ? dbError.message : String(dbError);
+            console.error('[TRANSCRIPT-DB] Failed to save user transcript:', {
+              sessionId,
+              transcript: transcript.substring(0, 50),
+              error: errorMsg,
+              details: dbError,
+            });
+            throw dbError;
+          }
 
           // Process with AI
           const response = await interviewerAgent.processUserMessage(sessionId, transcript);
 
           // Save AI response transcript
-          await sessionRepository.addTranscript(sessionId, {
-            role: 'assistant',
-            text: response,
-            timestamp: new Date(),
-          });
+          try {
+            await sessionRepository.addTranscript(sessionId, {
+              role: 'assistant',
+              content: response,
+              timestamp: new Date(),
+            });
+          } catch (dbError: unknown) {
+            const errorMsg = dbError instanceof Error ? dbError.message : String(dbError);
+            console.error('[TRANSCRIPT-DB] Failed to save assistant transcript:', {
+              sessionId,
+              response: response.substring(0, 50),
+              error: errorMsg,
+              details: dbError,
+            });
+            throw dbError;
+          }
 
           // Speak response
           await speakToCandidate(sessionId, room, response);
