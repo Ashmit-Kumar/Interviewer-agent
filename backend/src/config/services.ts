@@ -36,6 +36,10 @@ if (!elevenLabsConfig.apiKey) {
   console.warn('⚠️  ElevenLabs API key is missing. TTS will fail.');
 }
 
+if (!elevenLabsConfig.voiceId || elevenLabsConfig.voiceId === 'Rachel') {
+  console.warn('⚠️  ElevenLabs voice ID is missing or invalid. Use a proper voice ID (e.g., 21m00Tcm4TlvDq8ikWAM), not a voice name.');
+}
+
 if (!groqConfig.apiKey) {
   console.warn('⚠️  Groq API key is missing. Evaluation will fail.');
 }

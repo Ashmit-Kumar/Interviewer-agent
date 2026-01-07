@@ -35,15 +35,24 @@ export class DeepgramService {
     const connection = this.deepgram.listen.live({
       model: 'nova-2',
       language: 'en-US',
+      encoding: 'linear16',
+      sample_rate: 48000,
+      channels: 1,
       smart_format: true,
       interim_results: false,
     });
 
     connection.on(LiveTranscriptionEvents.Transcript, (data) => {
       const transcript = data.channel?.alternatives[0]?.transcript;
-      if (transcript) {
+      if (transcript && transcript.trim().length > 0) {
         onTranscript(transcript);
       }
+      // if (transcript) {
+      //   onTranscript(transcript);
+      // }
+    });
+    connection.on(LiveTranscriptionEvents.Close, () => {
+      console.log('🔴 Deepgram live connection closed');
     });
 
     connection.on(LiveTranscriptionEvents.Error, (error) => {
