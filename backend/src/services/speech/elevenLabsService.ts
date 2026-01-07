@@ -1,36 +1,36 @@
-import axios from 'axios';
-import { elevenLabsConfig } from '../../config/services';
+  import axios from 'axios';
+  import { elevenLabsConfig } from '../../config/services';
 
-export class ElevenLabsService {
-  private apiUrl = 'https://api.elevenlabs.io/v1';
+  export class ElevenLabsService {
+    private apiUrl = 'https://api.elevenlabs.io/v1';
 
-  async generateSpeech(text: string): Promise<Buffer> {
-    try {
-      const response = await axios.post(
-        `${this.apiUrl}/text-to-speech/${elevenLabsConfig.voiceId}`,
-        {
-          text,
-          model_id: 'eleven_turbo_v2_5',
-          voice_settings: {
-            stability: 0.5,
-            similarity_boost: 0.75,
+    async generateSpeech(text: string): Promise<Buffer> {
+      try {
+        const response = await axios.post(
+          `${this.apiUrl}/text-to-speech/${elevenLabsConfig.voiceId}`,
+          {
+            text,
+            model_id: 'eleven_turbo_v2_5',
+            voice_settings: {
+              stability: 0.5,
+              similarity_boost: 0.75,
+            },
           },
-        },
-        {
-          headers: {
-            'xi-api-key': elevenLabsConfig.apiKey,
-            'Content-Type': 'application/json',
-          },
-          responseType: 'arraybuffer',
-        }
-      );
+          {
+            headers: {
+              'xi-api-key': elevenLabsConfig.apiKey,
+              'Content-Type': 'application/json',
+            },
+            responseType: 'arraybuffer',
+          }
+        );
 
-      return Buffer.from(response.data);
-    } catch (error) {
-      console.error('ElevenLabs TTS error:', error);
-      throw new Error('Failed to generate speech');
+        return Buffer.from(response.data);
+      } catch (error) {
+        console.error('ElevenLabs TTS error:', error);
+        throw new Error('Failed to generate speech');
+      }
     }
   }
-}
 
-export const elevenLabsService = new ElevenLabsService();
+  export const elevenLabsService = new ElevenLabsService();

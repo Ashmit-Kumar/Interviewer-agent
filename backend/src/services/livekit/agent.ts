@@ -4,18 +4,23 @@ import {
   RemoteParticipant, 
   RemoteTrack,
   RemoteAudioTrack,
+  RemoteTrackPublication,
   TrackKind,
   AudioSource,
   LocalAudioTrack,
-  AudioFrame 
+  AudioFrame,
+  AudioStream
 } from '@livekit/rtc-node';
-import { deepgramService } from '../speech/deepgramService';
-import { elevenLabsService } from '../speech/elevenLabsService';
+import { ElevenLabsClient } from 'elevenlabs';
+import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import { interviewerAgent } from '../ai/interviewerAgent';
 import { sessionRepository } from '../../repositories/sessionRepository';
 import { livekitConfig } from '../../config/services';
-import { spawn } from 'child_process';
 
+// Global audio track management (persistent across speech calls)
+let persistentAudioSource: AudioSource | null = null;
+let persistentAudioTrack: LocalAudioTrack | null = null;
+// let agentSpeaking = false;
 async function main() {
   const [roomName, token, sessionId] = process.argv.slice(2);
 
@@ -30,7 +35,7 @@ async function main() {
 
   room.on(RoomEvent.TrackSubscribed, async (
     track: RemoteTrack,
-    _publication: any,
+    _publication: RemoteTrackPublication,
     participant: RemoteParticipant
   ) => {
     if (track.kind === TrackKind.KIND_AUDIO && participant.identity === 'candidate') {
@@ -55,53 +60,145 @@ async function main() {
 }
 
 async function handleCandidateAudio(sessionId: string, track: RemoteTrack, room: Room) {
-  console.log('🎧 Setting up audio pipeline: LiveKit → Deepgram');
+  console.log('🎧 Setting up audio pipeline: LiveKit → Deepgram (PCM format)');
   
-  const transcriber = deepgramService.createLiveTranscriber(async (transcript) => {
-    console.log(`💬 Candidate said: "${transcript}"`);
-
-    // Save transcript
-    await sessionRepository.addTranscript(sessionId, {
-      role: 'user',
-      text: transcript,
-      timestamp: new Date(),
-    });
-
-    // Process with AI
-    const response = await interviewerAgent.processUserMessage(sessionId, transcript);
-
-    // Save AI response transcript
-    await sessionRepository.addTranscript(sessionId, {
-      role: 'assistant',
-      text: response,
-      timestamp: new Date(),
-    });
-
-    // Speak response
-    await speakToCandidate(sessionId, room, response);
+  // Create Deepgram client
+  const deepgram = createClient(process.env.DEEPGRAM_API_KEY || '');
+  
+  // Create live transcription connection with proper PCM settings
+  const connection = deepgram.listen.live({
+    model: 'nova-2',
+    language: 'en-US',
+    encoding: 'linear16',
+    sample_rate: 48000,
+    channels: 1,
+    smart_format: true,
+    interim_results: true,
+    endpointing: 300
   });
 
-  // Stream audio frames directly to Deepgram using @livekit/rtc-node API
-  try {
-    console.log('✅ Setting up audio frame receiver');
-    
-    // Cast to RemoteAudioTrack to access audio stream
-    const audioTrack = track as RemoteAudioTrack;
-    
-    // Note: Audio streaming will be handled in next iteration
-    // For now, using placeholder
-    console.log('Audio track ready:', audioTrack.sid);
-    
-    // TODO: Implement proper audio frame streaming
-    // This requires additional LiveKit RTC Node SDK configuration
-    // Transcriber is ready but audio streaming not yet implemented
-    console.log('Transcriber ready:', !!transcriber);
+  connection.on(LiveTranscriptionEvents.Open, () => {
+    console.log('✅ Deepgram WebSocket CONNECTED');
+  });
 
-    console.log('✅ Audio pipeline placeholder established');
+  connection.on(LiveTranscriptionEvents.Transcript, async (data) => {
+    const transcript = data.channel?.alternatives[0]?.transcript;
+    
+    if (transcript && transcript.trim().length > 0) {
+      console.log(`📝 INTERIM: "${transcript}"`);
+      
+      // Only process final transcripts
+      if (data.is_final) {
+        console.log(`💬 FINAL: "${transcript}"`);
+
+        try {
+          // Save transcript
+          await sessionRepository.addTranscript(sessionId, {
+            role: 'user',
+            text: transcript,
+            timestamp: new Date(),
+          });
+
+          // Process with AI
+          const response = await interviewerAgent.processUserMessage(sessionId, transcript);
+
+          // Save AI response transcript
+          await sessionRepository.addTranscript(sessionId, {
+            role: 'assistant',
+            text: response,
+            timestamp: new Date(),
+          });
+
+          // Speak response
+          await speakToCandidate(sessionId, room, response);
+        } catch (processError) {
+          console.error('❌ Error processing transcript:', processError);
+        }
+      }
+    }
+  });
+
+  connection.on(LiveTranscriptionEvents.Close, () => {
+    console.log('🔴 Deepgram connection closed');
+  });
+
+  connection.on(LiveTranscriptionEvents.Error, (error) => {
+    console.error('❌ Deepgram error:', error);
+  });
+
+  try {
+    const audioTrack = track as RemoteAudioTrack;
+    console.log('🎤 Audio track ready:', {
+      sid: audioTrack.sid,
+      trackKind: audioTrack.kind
+    });
+    
+    // Create AudioStream from RemoteAudioTrack with explicit sample rate
+    const audioStream = new AudioStream(audioTrack, 48000);
+    console.log('✅ AudioStream created at 48kHz sample rate');
+    
+    let frameCount = 0;
+    let bytesSent = 0;
+    let isStreaming = true;
+    
+    // Process audio frames and send to Deepgram
+    (async () => {
+      try {
+        console.log('🎯 Starting to stream audio frames to Deepgram...');
+        
+        // Iterate through audio frames from LiveKit
+        // AudioStream is iterable despite type issues
+        const frameIterator = audioStream as unknown as AsyncIterable<AudioFrame>;
+        
+        for await (const frame of frameIterator) {
+          if (!isStreaming) {
+            console.log('✅ Audio streaming stopped');
+            connection.finish();
+            break;
+          }
+
+          try {
+            frameCount++;
+            
+            // Get audio data from frame
+            if (frame && frame.data) {
+              const frameData = frame.data;
+              bytesSent += frameData.length;
+              
+              // Convert Int16Array to ArrayBuffer for Deepgram
+              const arrayBuffer = frameData.buffer.slice(
+                frameData.byteOffset,
+                frameData.byteOffset + frameData.byteLength
+              );
+              connection.send(arrayBuffer);
+              
+              // Log progress every 100 frames (~2 seconds at 48kHz, 20ms frames)
+              if (frameCount % 100 === 0) {
+                const durationSecs = (frameCount * 20) / 1000;
+                console.log(`📊 Sent: ${frameCount} frames, ${bytesSent} bytes, ~${durationSecs.toFixed(1)}s`);
+              }
+            }
+          } catch (frameError) {
+            console.error('❌ Error sending frame:', frameError);
+            break;
+          }
+        }
+        
+        console.log(`✅ Audio stream ended: ${frameCount} frames, ${bytesSent} bytes sent`);
+        connection.finish();
+      } catch (streamError) {
+        console.error('❌ Audio streaming error:', streamError);
+        isStreaming = false;
+        connection.finish();
+      }
+    })();
+
+    console.log('✅ Audio pipeline established: LiveKit (48kHz PCM) → Deepgram');
+    console.log('🎙️  Listening for candidate audio...');
     
   } catch (error) {
     console.error('❌ Failed to set up audio pipeline:', error);
-    console.error('Error details:', error);
+    console.error('Stack:', error instanceof Error ? error.stack : 'N/A');
   }
 }
 
@@ -109,104 +206,78 @@ async function speakToCandidate(_sessionId: string, room: Room, text: string) {
   try {
     console.log(`🤖 AI speaking: "${text}"`);
 
-    // Generate TTS from ElevenLabs
-    const audioBuffer = await elevenLabsService.generateSpeech(text);
-    console.log(`✅ Speech generated (${audioBuffer.length} bytes)`);
-
-    // Convert MP3 → PCM
-    const pcmBuffer = await convertMp3ToPcm(audioBuffer);
-    console.log(`✅ Audio converted to PCM (${pcmBuffer.length} bytes)`);
-
-    // Create audio source and track
-    const source = new AudioSource(48000, 1); // 48kHz, mono
-    const track = LocalAudioTrack.createAudioTrack('ai-voice', source);
-
-    // Publish track to room
-    if (room.localParticipant) {
-      const publication = await room.localParticipant.publishTrack(track, {
-        name: 'ai-voice',
-        stream: 'audio'
-      } as any);
-      console.log('✅ Audio track published:', publication.sid);
+    if (!room.localParticipant) {
+      throw new Error('Local participant not available');
     }
 
-    // Stream PCM frames to LiveKit
-    const pcm = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.length / 2);
-    const frameSize = 480; // 10ms @ 48kHz
-    const sampleRate = 48000;
-    const numChannels = 1;
+    if (!process.env.ELEVENLABS_API_KEY) {
+      throw new Error('ELEVENLABS_API_KEY is not set in environment variables');
+    }
 
-    for (let i = 0; i < pcm.length; i += frameSize) {
-      const frameData = pcm.subarray(i, Math.min(i + frameSize, pcm.length));
+    const elevenlabs = new ElevenLabsClient({
+      apiKey: process.env.ELEVENLABS_API_KEY
+    });
+
+    console.log('🎵 Generating speech with ElevenLabs...');
+    
+    // Generate audio stream from ElevenLabs
+    const audioStream = await elevenlabs.textToSpeech.convertAsStream(
+      process.env.ELEVENLABS_VOICE_ID || 'nPczCjzI2devNBz1zQrb',
+      {
+        text: text,
+        model_id: 'eleven_flash_v2_5',
+        output_format: 'pcm_16000'
+      }
+    );
+
+    // Create or reuse persistent audio source/track
+    if (!persistentAudioSource || !persistentAudioTrack) {
+      console.log('🎙️ Creating persistent audio track...');
+      persistentAudioSource = new AudioSource(16000, 1);
+      persistentAudioTrack = LocalAudioTrack.createAudioTrack('agent-voice', persistentAudioSource);
+      
+      // Publish track (LiveKit SDK requires options parameter)
+      const opts = {};
+      await room.localParticipant.publishTrack(persistentAudioTrack, opts as Parameters<typeof room.localParticipant.publishTrack>[1]);
+      console.log('✅ Persistent audio track published');
+    }
+
+    // Stream audio data to LiveKit
+    const chunks: Buffer[] = [];
+    for await (const chunk of audioStream) {
+      chunks.push(chunk);
+    }
+
+    const audioBuffer = Buffer.concat(chunks);
+    console.log(`✅ Audio received (${audioBuffer.length} bytes)`);
+    
+    // Convert to Int16Array
+    const pcmData = new Int16Array(
+      audioBuffer.buffer,
+      audioBuffer.byteOffset,
+      audioBuffer.length / 2
+    );
+
+    // Stream audio frames to persistent track
+    const chunkSize = 1600; // 100ms at 16kHz
+    for (let i = 0; i < pcmData.length; i += chunkSize) {
+      const chunk = pcmData.slice(i, Math.min(i + chunkSize, pcmData.length));
       const audioFrame = new AudioFrame(
-        frameData,
-        sampleRate,
-        numChannels,
-        frameData.length
+        chunk,
+        16000,
+        1,
+        chunk.length
       );
-      await source.captureFrame(audioFrame);
-      await sleep(10); // 10ms per frame
+      await persistentAudioSource.captureFrame(audioFrame);
+      await sleep(100);
     }
 
-    console.log('✅ All audio frames sent');
-
-    // Unpublish track
-    if (room.localParticipant && track.sid) {
-      await room.localParticipant.unpublishTrack(track.sid);
-      console.log('✅ Audio track unpublished');
-    }
+    console.log('✅ Audio playback complete');
     
   } catch (error) {
     console.error('❌ Failed to speak:', error);
   }
 }
-
-// Helper function to convert MP3 to PCM using FFmpeg
-async function convertMp3ToPcm(audioBuffer: Buffer): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    const ffmpeg = spawn('ffmpeg', [
-      '-i', 'pipe:0',           // Input from stdin
-      '-f', 's16le',            // Output format: signed 16-bit little-endian PCM
-      '-ar', '48000',           // Sample rate: 48kHz
-      '-ac', '1',               // Channels: mono
-      'pipe:1'                  // Output to stdout
-    ]);
-
-    const pcmChunks: Buffer[] = [];
-
-    ffmpeg.stdout.on('data', (chunk: Buffer) => {
-      pcmChunks.push(chunk);
-    });
-
-    ffmpeg.stderr.on('data', (data: any) => {
-      // FFmpeg logs to stderr - only log actual errors
-      const msg = data.toString();
-      if (msg.toLowerCase().includes('error')) {
-        console.error('FFmpeg:', msg);
-      }
-    });
-
-    ffmpeg.on('close', (code: number | null) => {
-      if (code !== 0) {
-        reject(new Error(`FFmpeg exited with code ${code}`));
-        return;
-      }
-      resolve(Buffer.concat(pcmChunks));
-    });
-
-    ffmpeg.on('error', (err: any) => {
-      reject(err);
-    });
-
-    ffmpeg.stdin.write(audioBuffer);
-    ffmpeg.stdin.end();
-  });
-}
-
-// Helper function to sleep
-// function sleep(ms: number): Promise<void> {
-//   return new Promise(resolve => setTimeout(resolve, ms));
-// }
 
 // Helper function for timing audio frames
 function sleep(ms: number): Promise<void> {
