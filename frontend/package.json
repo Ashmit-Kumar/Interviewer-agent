@@ -16,26 +16,24 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@monaco-editor/react": "^4.7.0",
-    "@types/node": "^25.0.3",
-    "@types/react": "^19.2.7",
-    "@types/react-dom": "^19.2.3",
-    "@vapi-ai/web": "^2.5.2",
-    "axios": "^1.13.2",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "lucide-react": "^0.562.0",
-    "next": "^16.1.1",
-    "react": "^19.2.3",
-    "react-dom": "^19.2.3",
-    "tailwind-merge": "^3.4.0",
-    "tailwindcss-animate": "^1.0.7",
-    "typescript": "^5.9.3"
+    "@livekit/components-react": "^2.9.17",
+    "@monaco-editor/react": "^4.6.0",
+    "axios": "^1.6.0",
+    "livekit-client": "^2.16.1",
+    "next": "^14.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tailwindcss-animate": "1.0.7",
+    "tailwind-merge": "3.4.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.18",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
     "autoprefixer": "^10.4.23",
     "postcss": "^8.5.6",
-    "tailwindcss": "^4.0.0"
+    "tailwindcss": "^4.0.0",
+    "typescript": "^5.0.0"
   }
 }

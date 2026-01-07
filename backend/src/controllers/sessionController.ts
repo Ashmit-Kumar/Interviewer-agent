@@ -4,7 +4,7 @@ import { sessionRepository } from '../repositories/sessionRepository';
 import { interviewOrchestrator } from '../services/interview-orchestrator/interviewOrchestrator';
 import { evaluationService } from '../services/evaluation/evaluationService';
 import { ApiError } from '../middlewares/errorHandler';
-import { vapiConfig } from '../config/services';
+// import { vapiConfig } from '../config/services';
 
 export class SessionController {
   startSession = async (_req: Request, res: Response, next: NextFunction) => {
@@ -12,7 +12,7 @@ export class SessionController {
       const sessionId = uuidv4();
 
       // Initialize interview orchestrator
-      const { question, agentContext } = await interviewOrchestrator.initializeInterview(sessionId);
+      const { question } = await interviewOrchestrator.initializeInterview(sessionId);
 
       // Create session in MongoDB
       await sessionRepository.create({
@@ -23,7 +23,7 @@ export class SessionController {
         transcripts: [],
       });
 
-      // Return session data with Vapi configuration
+      // Return session data (frontend will call /api/livekit/room separately)
       res.status(201).json({
         success: true,
         data: {
@@ -33,14 +33,6 @@ export class SessionController {
             difficulty: question.difficulty,
             description: question.description,
             constraints: question.constraints,
-          },
-          vapiConfig: {
-            publicKey: vapiConfig.publicKey,
-            agentId: vapiConfig.agentId,
-            metadata: {
-              sessionId,
-              agentContext,
-            },
           },
         },
       });

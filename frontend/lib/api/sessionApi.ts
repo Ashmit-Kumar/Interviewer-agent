@@ -19,14 +19,15 @@ export interface StartSessionResponse {
       description: string;
       constraints: string[];
     };
-    vapiConfig: {
-      publicKey: string;
-      agentId: string;
-      metadata: {
-        sessionId: string;
-        agentContext: string;
-      };
-    };
+  };
+}
+
+export interface CreateLiveKitRoomResponse {
+  success: boolean;
+  data: {
+    roomName: string;
+    candidateToken: string;
+    wsUrl: string;
   };
 }
 
@@ -66,12 +67,21 @@ export const sessionApi = {
     return response.data;
   },
 
+  async createLiveKitRoom(sessionId: string): Promise<CreateLiveKitRoomResponse> {
+    const response = await apiClient.post(`/livekit/room`, { sessionId });
+    return response.data;
+  },
+
   async updateCode(sessionId: string, code: string): Promise<void> {
     await apiClient.put(`/sessions/${sessionId}/code`, { code });
   },
 
   async endSession(sessionId: string): Promise<void> {
     await apiClient.post(`/sessions/${sessionId}/end`);
+  },
+
+  async endLiveKitRoom(sessionId: string): Promise<void> {
+    await apiClient.delete(`/livekit/room/${sessionId}`);
   },
 
   async getResults(sessionId: string): Promise<SessionResultsResponse> {

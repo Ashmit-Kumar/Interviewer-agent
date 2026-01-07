@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import { connectDatabase } from './config/database';
 import { connectRedis } from './config/redis';
 import sessionRoutes from './routes/sessionRoutes';
-import vapiRoutes from './routes/vapiRoutes';
+import livekitRoutes from './routes/livekitRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 
 // Load environment variables
@@ -28,7 +28,7 @@ app.get('/health', (_req, res) => {
 
 // API Routes
 app.use('/api/sessions', sessionRoutes);
-app.use('/api/vapi', vapiRoutes);
+app.use('/api/livekit', livekitRoutes);
 
 // Error handling middleware (must be last)
 app.use(errorHandler);

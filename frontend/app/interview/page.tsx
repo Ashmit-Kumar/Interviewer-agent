@@ -2,11 +2,8 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import Vapi from "@vapi-ai/web";
 import CodeEditor from "@/components/code-editor/CodeEditor";
-import TranscriptPanel from "@/components/transcript/TranscriptPanel";
-import VoiceAgentPanel from "@/components/voice-agent/VoiceAgentPanel";
-import InterviewHeader from "@/components/interview/InterviewHeader";
+import { useLiveKit } from "@/lib/hooks/useLiveKit";
 import { sessionApi } from "@/lib/api/sessionApi";
 
 const INITIAL_CODE = `// Write your solution here\n\nfunction solution() {\n  // Your code\n}\n`;
@@ -30,18 +27,19 @@ export default function InterviewPage() {
     description: "",
     constraints: [] as string[]
   });
-  const [isMuted, setIsMuted] = useState(false);
-  const [isCallActive, setIsCallActive] = useState(false);
   const [isEnding, setIsEnding] = useState(false);
-  const [agentState, setAgentState] = useState<"idle" | "listening" | "speaking">("idle");
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [livekitConfig, setLivekitConfig] = useState<{
+    roomName: string;
+    token: string;
+    wsUrl: string;
+  } | null>(null);
   
-  const vapiRef = useRef<Vapi | null>(null);
   const autosaveTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Load session data from sessionStorage and initialize Vapi
+  // Load session data from sessionStorage
   useEffect(() => {
     if (!sessionId) {
       setError("No session ID provided");
@@ -62,101 +60,80 @@ export default function InterviewPage() {
       // Set question data
       setCurrentQuestion(sessionData.question);
       
-      // Log configuration for debugging
-      console.log("Vapi Config:", {
-        publicKey: sessionData.vapiConfig.publicKey,
-        agentId: sessionData.vapiConfig.agentId,
-        metadata: sessionData.vapiConfig.metadata
+      // Set LiveKit configuration
+      const config = {
+        roomName: sessionData.livekitRoomName,
+        token: sessionData.livekitToken,
+        wsUrl: sessionData.livekitWsUrl,
+      };
+      
+      // Validate all required fields
+      console.log('🔍 Validating LiveKit config from sessionStorage:', {
+        hasRoomName: !!config.roomName,
+        hasToken: !!config.token,
+        tokenLength: config.token?.length || 0,
+        hasWsUrl: !!config.wsUrl,
+        wsUrl: config.wsUrl,
       });
       
-      // Validate keys are present
-      if (!sessionData.vapiConfig.publicKey) {
-        throw new Error("Vapi public key is missing");
-      }
-      if (!sessionData.vapiConfig.agentId) {
-        throw new Error("Vapi agent ID is missing");
+      if (!config.token) {
+        throw new Error('LiveKit token missing from session data');
       }
       
-      // Initialize Vapi client
-      const vapi = new Vapi(sessionData.vapiConfig.publicKey);
-      vapiRef.current = vapi;
-
-      // Set up Vapi event listeners
-      vapi.on("call-start", () => {
-        console.log("Call started");
-        setIsCallActive(true);
-        setAgentState("listening");
-      });
-
-      vapi.on("call-end", () => {
-        console.log("Call ended");
-        setIsCallActive(false);
-        setAgentState("idle");
-      });
-
-      vapi.on("speech-start", () => {
-        setAgentState("speaking");
-      });
-
-      vapi.on("speech-end", () => {
-        setAgentState("listening");
-      });
-
-      vapi.on("message", (message: any) => {
-        console.log("Vapi message:", message);
-        
-        if (message.type === "transcript" && message.transcript) {
-          const newMessage: Message = {
-            id: Date.now().toString(),
-            role: message.role === "assistant" ? "assistant" : "user",
-            content: message.transcript,
-            timestamp: new Date(),
-          };
-          setMessages((prev) => [...prev, newMessage]);
-        }
-      });
-
-      vapi.on("error", (error: any) => {
-        console.error("Vapi error details:", JSON.stringify(error, null, 2));
-        console.error("Error type:", typeof error);
-        console.error("Error keys:", Object.keys(error));
-        // Don't set error state immediately - might just be a warning
-      });
-
-      // Start the call with proper error handling
-      try {
-        console.log("Starting Vapi call with assistantId:", sessionData.vapiConfig.agentId);
-        vapi.start(sessionData.vapiConfig.agentId, {
-          variableValues: {
-            sessionId: sessionData.vapiConfig.metadata.sessionId,
-            agentContext: sessionData.vapiConfig.metadata.agentContext
-          }
-        });
-        console.log("Vapi call initiated");
-      } catch (startError: any) {
-        console.error("Failed to start Vapi call:", startError);
-        setError(`Voice agent failed to start: ${startError.message || 'Unknown error'}`);
-        setIsLoading(false);
-        return;
+      if (!config.wsUrl) {
+        throw new Error('LiveKit URL missing from session data');
       }
-
+      
+      if (!config.roomName) {
+        throw new Error('LiveKit room name missing from session data');
+      }
+      
+      setLivekitConfig(config);
+      
       setIsLoading(false);
     } catch (err) {
-      console.error("Failed to initialize interview:", err);
-      setError("Failed to initialize interview");
+      console.error("Failed to load session:", err);
+      setError("Failed to load interview session");
       setIsLoading(false);
     }
 
     // Cleanup on unmount
     return () => {
-      if (vapiRef.current) {
-        vapiRef.current.stop();
-      }
       if (autosaveTimerRef.current) {
         clearTimeout(autosaveTimerRef.current);
       }
     };
   }, [sessionId]);
+
+  // Initialize LiveKit connection ONLY when config is ready
+  const livekitHookResult = useLiveKit(
+    livekitConfig ? {
+      roomName: livekitConfig.roomName,
+      token: livekitConfig.token,
+      wsUrl: livekitConfig.wsUrl,
+      onConnected: () => {
+        console.log("✅ Connected to LiveKit room");
+      },
+      onDisconnected: () => {
+        console.log("Disconnected from LiveKit room");
+      },
+      onTrackSubscribed: (track) => {
+        console.log("AI audio track subscribed");
+      },
+    } : {
+      roomName: "",
+      token: "",
+      wsUrl: "",
+    }
+  );
+
+  const {
+    isConnected,
+    isMuted,
+    isAISpeaking,
+    toggleMute,
+    disconnect,
+  } = livekitHookResult;
 
   // Auto-save code with debounce
   const saveCode = useCallback(async (codeToSave: string) => {
@@ -184,27 +161,24 @@ export default function InterviewPage() {
   };
 
   const handleToggleMute = () => {
-    if (vapiRef.current) {
-      vapiRef.current.setMuted(!isMuted);
-      setIsMuted(!isMuted);
-    }
+    toggleMute();
   };
 
   const handleEndCall = async () => {
     if (!sessionId) return;
     
     setIsEnding(true);
-    setIsCallActive(false);
     
     try {
-      // Stop Vapi call
-      if (vapiRef.current) {
-        vapiRef.current.stop();
-      }
+      // Disconnect from LiveKit room
+      disconnect();
       
       // Save final code and end session
       await sessionApi.updateCode(sessionId, code);
       await sessionApi.endSession(sessionId);
+      
+      // End LiveKit room on backend
+      await sessionApi.endLiveKitRoom(sessionId);
       
       // Navigate to results page
       router.push(`/results?sessionId=${sessionId}`);
@@ -216,7 +190,7 @@ export default function InterviewPage() {
   };
 
   // Show loading state
-  if (isLoading) {
+  if (isLoading || !livekitConfig) {
     return (
       <div className="h-screen flex items-center justify-center bg-gradient-to-br from-[#0f172a] via-[#111827] to-[#0f172a]">
         <div className="text-center">
@@ -304,25 +278,23 @@ export default function InterviewPage() {
             {/* Voice Agent Section at Bottom */}
             <div className="mt-auto pt-6 border-t border-white/10">
               <div className="space-y-4">
-                {/* Agent Status */}
-                {isCallActive && (
-                  <div className="flex items-center gap-3 p-3 bg-white/5 backdrop-blur-sm rounded-xl border border-white/10">
-                    <div className="flex gap-1">
-                      <div className={`w-1 h-8 rounded-full ${agentState === 'listening' ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-slate-600'} animate-pulse`}></div>
-                      <div className={`w-1 h-10 rounded-full ${agentState === 'listening' ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-slate-600'} animate-pulse-delay-75`}></div>
-                      <div className={`w-1 h-6 rounded-full ${agentState === 'listening' ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-slate-600'} animate-pulse-delay-150`}></div>
-                    </div>
-                    <div className="flex-1">
-                      <p className="text-xs text-slate-300 font-medium">
-                        {agentState === "speaking"
-                          ? "Agent is speaking..."
-                          : agentState === "listening"
-                          ? "Agent is listening..."
-                          : "Agent is idle..."}
-                      </p>
-                    </div>
+                {/* Connection Status */}
+                <div className="flex items-center gap-3 p-3 bg-white/5 backdrop-blur-sm rounded-xl border border-white/10">
+                  <div className="flex gap-1">
+                    <div className={`w-1 h-8 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-slate-600'} animate-pulse`}></div>
+                    <div className={`w-1 h-10 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-slate-600'} animate-pulse-delay-75`}></div>
+                    <div className={`w-1 h-6 rounded-full ${isConnected ? 'bg-emerald-500 shadow-[0_0_8px_#10b981]' : 'bg-slate-600'} animate-pulse-delay-150`}></div>
                   </div>
-                )}
+                  <div className="flex-1">
+                    <p className="text-xs text-slate-300 font-medium">
+                      {!isConnected
+                        ? "Connecting to voice..."
+                        : isAISpeaking
+                        ? "AI is speaking..."
+                        : "AI is listening..."}
+                    </p>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -340,17 +312,19 @@ export default function InterviewPage() {
               <div className="flex items-center gap-3">
                 <button 
                   onClick={handleToggleMute}
-                  disabled={!isCallActive}
-                  className="flex items-center gap-2 px-4 py-1.5 text-xs text-slate-400 hover:text-white transition-colors disabled:opacity-50"
+                  disabled={!isConnected}
+                  className={`flex items-center gap-2 px-4 py-1.5 text-xs transition-colors disabled:opacity-50 ${
+                    isMuted ? 'text-red-400 hover:text-red-300' : 'text-slate-400 hover:text-white'
+                  }`}
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
                   </svg>
-                  Mute
+                  {isMuted ? 'Unmute' : 'Mute'}
                 </button>
                 <button 
                   onClick={handleEndCall}
-                  disabled={!isCallActive}
+                  disabled={!isConnected}
                   className="bg-red-500 hover:bg-red-600 text-white px-4 py-1.5 rounded-lg text-sm font-semibold transition-all disabled:opacity-50 shadow-lg shadow-red-500/20"
                 >
                   End Interview
@@ -374,8 +348,10 @@ export default function InterviewPage() {
             <div className="flex items-center justify-between px-6 py-3 border-b border-white/10 flex-shrink-0">
               <h2 className="text-sm font-semibold text-slate-200">AI Transcription</h2>
               <div className="flex items-center gap-2">
-                <span className="w-2 h-2 bg-red-500 rounded-full animate-pulse shadow-[0_0_8px_#ef4444]"></span>
-                <span className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">Live Session</span>
+                <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 animate-pulse shadow-[0_0_8px_#10b981]' : 'bg-red-500'}`}></span>
+                <span className="text-[10px] uppercase tracking-widest text-slate-500 font-bold">
+                  {isConnected ? 'Live Session' : 'Connecting...'}
+                </span>
               </div>
             </div>
             
@@ -383,7 +359,7 @@ export default function InterviewPage() {
             <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
               {messages.length === 0 ? (
               <div className="text-center text-slate-500 text-sm mt-8">
-                AI is analyzing...
+                {isConnected ? "Conversation will appear here..." : "Connecting to voice system..."}
               </div>
               ) : (
               <>
@@ -407,13 +383,19 @@ export default function InterviewPage() {
               )}
             </div>
 
-            {/* AI Analyzing Progress Bar at Bottom */}
-            <div className="absolute bottom-4 left-4 right-4 text-center">
-              <div className="w-full h-[2px] bg-slate-700 rounded-full mb-2 overflow-hidden">
-                <div className="w-1/3 h-full bg-blue-500 rounded-full shadow-[0_0_8px_#3b82f6] animate-pulse"></div>
+            {/* AI Status Bar at Bottom */}
+            {isConnected && (
+              <div className="absolute bottom-4 left-4 right-4 text-center">
+                <div className="w-full h-[2px] bg-slate-700 rounded-full mb-2 overflow-hidden">
+                  <div className={`h-full rounded-full transition-all ${
+                    isAISpeaking ? 'w-full bg-blue-500 shadow-[0_0_8px_#3b82f6]' : 'w-1/3 bg-emerald-500 shadow-[0_0_8px_#10b981] animate-pulse'
+                  }`}></div>
+                </div>
+                <span className="text-[10px] text-slate-500 uppercase font-bold tracking-tighter">
+                  {isAISpeaking ? 'AI is speaking...' : 'Ready to listen'}
+                </span>
               </div>
-              <span className="text-[10px] text-slate-500 uppercase font-bold tracking-tighter">AI is analyzing...</span>
-            </div>
+            )}
           </div>
         </div>
       </div>

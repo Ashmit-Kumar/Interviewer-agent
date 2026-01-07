@@ -7,6 +7,7 @@ import { sessionApi } from "@/lib/api/sessionApi";
 export default function Home() {
   const router = useRouter();
   const [isLoading, setIsLoading] = useState(false);
+  const [loadingStep, setLoadingStep] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
 
   const handleStartInterview = async () => {
@@ -14,18 +15,43 @@ export default function Home() {
     setError(null);
     
     try {
-      // Call backend to start session
-      const response = await sessionApi.startSession();
+      // Step 1: Create session
+      setLoadingStep("Creating interview session...");
+      const sessionResponse = await sessionApi.startSession();
+      const { sessionId, question } = sessionResponse.data;
       
-      // Store session data in sessionStorage for interview page
-      sessionStorage.setItem('currentSession', JSON.stringify(response.data));
+      // Step 2: Create LiveKit room
+      setLoadingStep("Connecting to voice system...");
+      const roomResponse = await sessionApi.createLiveKitRoom(sessionId);
+      const { roomName, candidateToken, wsUrl } = roomResponse.data;
       
-      // Navigate to interview page with session ID
-      router.push(`/interview?sessionId=${response.data.sessionId}`);
+      // Validate LiveKit response
+      console.log('✅ LiveKit room created:', { roomName, hasToken: !!candidateToken, wsUrl });
+      
+      if (!candidateToken) {
+        throw new Error('LiveKit token not received from backend');
+      }
+      
+      if (!wsUrl) {
+        throw new Error('LiveKit URL not received from backend');
+      }
+      
+      // Store all data in sessionStorage
+      sessionStorage.setItem('currentSession', JSON.stringify({
+        sessionId,
+        question,
+        livekitRoomName: roomName,
+        livekitToken: candidateToken,
+        livekitWsUrl: wsUrl,
+      }));
+      
+      // Navigate to interview page
+      router.push(`/interview?sessionId=${sessionId}`);
     } catch (err) {
       console.error("Failed to start interview:", err);
       setError("Failed to start interview. Please try again.");
       setIsLoading(false);
+      setLoadingStep("");
     }
   };
 
@@ -50,7 +76,7 @@ export default function Home() {
                   Preparing Your Interview
                 </h3>
                 <p className="text-sm text-slate-400">
-                  Setting up the interview environment...
+                  {loadingStep || "Setting up the interview environment..."}
                 </p>
               </div>
             </div>
