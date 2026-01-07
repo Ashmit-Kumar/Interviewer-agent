@@ -59,7 +59,8 @@ export class SessionRepository {
     try {
       await Session.findOneAndUpdate(
         { sessionId },
-        { $push: { transcripts: transcript } }
+        { $push: { transcripts: transcript } },
+        { new: true }
       );
     } catch (error) {
       throw new ApiError(500, 'Failed to add transcript');

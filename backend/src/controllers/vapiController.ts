@@ -1,4 +1,8 @@
-import { Request, Response, NextFunction } from 'express';
+import { 
+  Request,
+  Response,
+  // NextFunction
+ } from 'express';
 import { interviewOrchestrator } from '../services/interview-orchestrator/interviewOrchestrator';
 import { sessionRepository } from '../repositories/sessionRepository';
 
@@ -91,12 +95,13 @@ export class VapiController {
   private async handleRecordExplanation(params: { sessionId: string; explanation: string }) {
     const { sessionId, explanation } = params;
     
-    const session = await sessionRepository.findById(sessionId);
+    const session = await sessionRepository.findBySessionId(sessionId);
     if (session) {
       await sessionRepository.addTranscript(sessionId, {
         role: 'assistant',
         text: `Candidate explained: ${explanation}`,
         timestamp: new Date(),
+        // { new: true },
       });
     }
     
@@ -122,10 +127,11 @@ export class VapiController {
     const { sessionId } = params;
     
     await interviewOrchestrator.completeInterview(sessionId);
-    await sessionRepository.update(sessionId, {
-      status: 'ended',
-      endedAt: new Date(),
-    });
+    // await sessionRepository.update(sessionId, {
+    //   status: 'ended',
+    //   endedAt: new Date(),
+    // });
+    await sessionRepository.endSession(sessionId);
     
     return {
       success: true,
@@ -155,10 +161,11 @@ export class VapiController {
     
     if (sessionId) {
       await interviewOrchestrator.completeInterview(sessionId);
-      await sessionRepository.update(sessionId, {
-        status: 'ended',
-        endedAt: new Date(),
-      });
+      // await sessionRepository.update(sessionId, {
+      //   status: 'ended',
+      //   endedAt: new Date(),
+      // });
+      await sessionRepository.endSession(sessionId);
     }
   }
 }
