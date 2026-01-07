@@ -149,8 +149,28 @@ export function useLiveKit({
     
     room
       .connect(wsUrl, token)
-      .then(() => {
+      .then(async () => {
         console.log('✅ LiveKit connection established successfully');
+        
+        // Enable and publish microphone
+        try {
+          console.log('🎤 Enabling microphone...');
+          await room.localParticipant.setMicrophoneEnabled(true);
+          console.log('✅ Microphone enabled and published');
+          
+          // Verify track is published
+          const micTrack = room.localParticipant.audioTrackPublications.values().next().value;
+          if (micTrack) {
+            console.log('✅ Microphone track confirmed:', {
+              trackSid: micTrack.trackSid,
+              isMuted: micTrack.isMuted,
+            });
+          }
+        } catch (micError) {
+          console.error('❌ Failed to enable microphone:', micError);
+          // Don't disconnect - user can manually enable later
+        }
+        
         connectingRef.current = false;
       })
       .catch((error) => {

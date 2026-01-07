@@ -44,8 +44,10 @@ async function main() {
 }
 
 async function handleCandidateAudio(sessionId: string, track: RemoteTrack, room: Room) {
+  console.log('🎧 Setting up audio pipeline: LiveKit → Deepgram');
+  
   const transcriber = deepgramService.createLiveTranscriber(async (transcript) => {
-    console.log(`Candidate said: ${transcript}`);
+    console.log(`💬 Candidate said: "${transcript}"`);
 
     // Save transcript
     await sessionRepository.addTranscript(sessionId, {
@@ -68,29 +70,70 @@ async function handleCandidateAudio(sessionId: string, track: RemoteTrack, room:
     await speakToCandidate(sessionId, room, response);
   });
 
-  // Get audio stream and pipe to Deepgram
-  const mediaStream = track.mediaStream;
-  if (mediaStream) {
-    const audioTrack = mediaStream.getAudioTracks()[0];
-    if (audioTrack) {
-      // Create MediaRecorder to capture audio chunks
-      const mediaRecorder = new MediaRecorder(mediaStream);
-      
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          // Convert Blob to Buffer and send to Deepgram
-          event.data.arrayBuffer().then(buffer => {
-            transcriber.send(Buffer.from(buffer));
-          });
-        }
-      };
-
-      mediaRecorder.start(100); // Capture every 100ms
+  // Stream audio frames directly to Deepgram
+  // LiveKit provides raw PCM audio data through the track
+  try {
+    // Attach audio receiver to get raw frames
+    const mediaStream = track.mediaStream;
+    if (!mediaStream) {
+      console.error('❌ No media stream available from track');
+      return;
     }
+
+    console.log('✅ Media stream obtained, creating audio context');
+    
+    // Use Web Audio API (available in Node via node-web-audio-api or similar)
+    // For now, we'll use a simpler approach with the track's MediaStream
+    const audioTrack = mediaStream.getAudioTracks()[0];
+    if (!audioTrack) {
+      console.error('❌ No audio track found in media stream');
+      return;
+    }
+
+    console.log('✅ Audio track obtained, setting up processor');
+
+    // Create a MediaStreamAudioSourceNode and process the audio
+    // Since we're in Node.js, we need to handle this differently
+    // We'll use the track's data events if available, or poll for frames
+    
+    // LiveKit RemoteTrack provides access to raw audio data
+    // Stream it directly to Deepgram
+    let frameCount = 0;
+    const audioContext = new (require('web-audio-api').AudioContext)();
+    const source = audioContext.createMediaStreamSource(mediaStream);
+    const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+    processor.onaudioprocess = (event: any) => {
+      const inputData = event.inputBuffer.getChannelData(0);
+      
+      // Convert Float32Array to Int16Array (PCM16)
+      const pcm16 = new Int16Array(inputData.length);
+      for (let i = 0; i < inputData.length; i++) {
+        const s = Math.max(-1, Math.min(1, inputData[i]));
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      
+      // Send to Deepgram (as ArrayBuffer for proper typing)
+      transcriber.send(pcm16.buffer as ArrayBuffer);
+      
+      frameCount++;
+      if (frameCount % 50 === 0) {
+        console.log(`📊 Processed ${frameCount} audio frames`);
+      }
+    };
+
+    source.connect(processor);
+    processor.connect(audioContext.destination);
+
+    console.log('✅ Audio pipeline established: LiveKit → Deepgram');
+    
+  } catch (error) {
+    console.error('❌ Failed to set up audio pipeline:', error);
+    console.error('Error details:', error);
   }
 }
 
-async function speakToCandidate(sessionId: string, room: Room, text: string) {
+async function speakToCandidate(_sessionId: string, _room: Room, text: string) {
   try {
     console.log(`AI speaking: ${text}`);
 

@@ -28,11 +28,12 @@
     "elevenlabs": "^1.59.0",
     "express": "^4.18.2",
     "groq-sdk": "^0.3.2",
-    "livekit-server-sdk": "^2.0.0",
     "livekit-client": "^2.0.0",
+    "livekit-server-sdk": "^2.0.0",
     "mongoose": "^8.0.3",
     "redis": "^4.6.12",
     "uuid": "^9.0.1",
+    "web-audio-api": "^0.2.2",
     "ws": "^8.16.0"
   },
   "devDependencies": {
