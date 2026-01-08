@@ -29,6 +29,7 @@ export function useLiveKit({
   const [isAISpeaking, setIsAISpeaking] = useState(false);
   const roomRef = useRef<Room | null>(null);
   const connectingRef = useRef(false);
+  const agentAudioRef = useRef<HTMLAudioElement | null>(null);
   const onConnectedRef = useRef(onConnected);
   const onDisconnectedRef = useRef(onDisconnected);
   const onTrackSubscribedRef = useRef(onTrackSubscribed);
@@ -39,6 +40,33 @@ export function useLiveKit({
     onDisconnectedRef.current = onDisconnected;
     onTrackSubscribedRef.current = onTrackSubscribed;
   }, [onConnected, onDisconnected, onTrackSubscribed]);
+
+  // Create a single persistent audio element on mount (reused for all agent audio)
+  useEffect(() => {
+    if (!agentAudioRef.current) {
+      console.log('🔊 [AUDIO] Creating persistent <audio> element for agent');
+      const el = document.createElement('audio');
+      el.autoplay = true;
+      el.volume = 1.0;
+      el.muted = false;
+      el.style.display = 'none';
+      document.body.appendChild(el);
+      agentAudioRef.current = el;
+      console.log('✅ [AUDIO] Persistent element ready', {
+        autoplay: el.autoplay,
+        volume: el.volume,
+        muted: el.muted,
+      });
+    }
+
+    return () => {
+      if (agentAudioRef.current) {
+        console.log('🧹 [AUDIO] Removing persistent <audio> element');
+        agentAudioRef.current.remove();
+        agentAudioRef.current = null;
+      }
+    };
+  }, []);
 
   // FIX ONE: Ready gate - ensure config is fully loaded
   const isConfigReady = Boolean(token) && Boolean(wsUrl) && Boolean(roomName);
@@ -119,25 +147,46 @@ export function useLiveKit({
     room.on(
       RoomEvent.TrackSubscribed,
       (track: RemoteTrack, publication: RemoteTrackPublication) => {
-        if (track.kind === Track.Kind.Audio) {
-          console.log('🎤 AI audio track subscribed');
+        if (track.kind === Track.Kind.Audio && publication.trackName === 'agent-voice') {
+          console.log('🎵 NEW AGENT TRACK (subscribed):', {
+            trackSid: track.sid,
+            trackName: publication.trackName,
+          });
           setIsAISpeaking(true);
           onTrackSubscribedRef.current?.(track);
           
-          // Create an audio element to play the track
-          const audioElement = track.attach();
-          document.body.appendChild(audioElement);
-          audioElement.play();
+          // Attach track to persistent audio element (created on mount)
+          if (agentAudioRef.current) {
+            track.attach(agentAudioRef.current);
+          }
+          
+          // Ensure playback starts (handle autoplay blocking)
+          agentAudioRef.current!.play().then(() => {
+            console.log('✅ Audio playback started successfully');
+          }).catch((err) => {
+            console.error('❌ Audio playback blocked by browser:', err);
+            console.error('User must interact with page to enable audio');
+          });
+        } else if (track.kind === Track.Kind.Audio) {
+          console.log('ℹ️ Ignoring non-agent audio track:', {
+            trackSid: track.sid,
+            trackName: publication.trackName,
+          });
         }
       }
     );
 
-    // Event: Track unsubscribed (AI stopped speaking)
-    room.on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
-      if (track.kind === Track.Kind.Audio) {
-        console.log('AI audio track unsubscribed');
+    // Event: Track unpublished (agent stopped speaking)
+    // NOTE: We do NOT detach audio here - let browser finish playing buffered audio
+    room.on(RoomEvent.TrackUnpublished, (publication: RemoteTrackPublication) => {
+      if (publication.kind === Track.Kind.Audio && publication.trackName === 'agent-voice') {
+        console.log('✅ Agent finished (unpublished):', {
+          trackSid: publication.trackSid,
+          trackName: publication.trackName,
+        });
         setIsAISpeaking(false);
-        track.detach();
+        // ✅ NO track.detach() here - let audio play naturally to completion
+        console.log('🎧 Audio element kept alive - playback will finish naturally');
       }
     });
 

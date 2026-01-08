@@ -421,13 +421,15 @@ async function speakToCandidate(room: Room, text: string) {
 
       totalBytes += chunk.length;
       const chunkSamples = chunk.length / 2; // 16-bit = 2 bytes per sample
+      const chunkDurationMs = (chunkSamples / 48000) * 1000; // REAL duration of this chunk
       totalSamples += chunkSamples;
-      const audioDurationMs = (totalSamples / 48000) * 1000;
+      const cumulativeAudioDurationMs = (totalSamples / 48000) * 1000;
       
       console.log(`📦 [VOICE] TTS Chunk ${chunkCount}:`);
       console.log(`   - Size: ${chunk.length} bytes (${chunkSamples} samples)`);
+      console.log(`   - Chunk duration: ${chunkDurationMs.toFixed(1)}ms (THIS chunk's real audio)`);
       console.log(`   - Cumulative: ${totalBytes} bytes total`);
-      console.log(`   - Audio duration: ${audioDurationMs.toFixed(1)}ms`);
+      console.log(`   - Cumulative audio duration: ${cumulativeAudioDurationMs.toFixed(1)}ms`);
       console.log(`   - Elapsed time: ${Date.now() - playbackStartTime}ms`);
 
       const pcm = new Int16Array(
@@ -444,9 +446,10 @@ async function speakToCandidate(room: Room, text: string) {
       const captureTime = Date.now() - captureStartTime;
       console.log(`✅ [VOICE] Frame captured to LiveKit (${captureTime}ms)`);
 
-      // Real-time pacing (18ms per frame ≈ 20ms at 48kHz)
-      console.log(`⏱️  [VOICE] Pacing delay: 18ms`);
-      await sleep(18);
+      // ⚡ CRITICAL FIX: Real-time pacing based on ACTUAL audio duration (not arbitrary 18ms)
+      // This ensures 500ms of audio takes ~500ms to send, not 100ms
+      console.log(`⏱️  [VOICE] Real-time pacing delay: ${chunkDurationMs.toFixed(1)}ms (based on sample count)`);
+      await sleep(chunkDurationMs);
       
       const chunkProcessTime = Date.now() - chunkReceiveTime;
       console.log(`⏲️  [VOICE] Chunk ${chunkCount} total processing: ${chunkProcessTime}ms`);
@@ -454,6 +457,8 @@ async function speakToCandidate(room: Room, text: string) {
 
     const totalPlaybackTime = Date.now() - playbackStartTime;
     const expectedAudioDuration = (totalSamples / 48000) * 1000;
+    const timeDifference = totalPlaybackTime - expectedAudioDuration;
+    const pacingAccuracy = ((expectedAudioDuration / totalPlaybackTime) * 100).toFixed(1);
     
     console.log('✅ [VOICE] Speech stream completed');
     console.log(`📊 [VOICE] Playback Statistics:`);
@@ -462,7 +467,14 @@ async function speakToCandidate(room: Room, text: string) {
     console.log(`   - Total samples: ${totalSamples}`);
     console.log(`   - Expected audio duration: ${expectedAudioDuration.toFixed(0)}ms`);
     console.log(`   - Actual playback time: ${totalPlaybackTime}ms`);
-    console.log(`   - Time difference: ${(totalPlaybackTime - expectedAudioDuration).toFixed(0)}ms`);
+    console.log(`   - Time difference: ${timeDifference.toFixed(0)}ms`);
+    console.log(`   - Pacing accuracy: ${pacingAccuracy}% (should be ~100%)`);
+    
+    if (Math.abs(timeDifference) > 100) {
+      console.log(`   ⚠️  WARNING: Pacing off by ${Math.abs(timeDifference).toFixed(0)}ms - audio may sound rushed!`);
+    } else {
+      console.log(`   ✅ Real-time pacing verified! Audio should sound natural.`);
+    }
 
     // Natural trailing pause
     console.log('⏱️  [VOICE] Post-speech pause: 200ms');
