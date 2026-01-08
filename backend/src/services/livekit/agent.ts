@@ -15,14 +15,21 @@ import { ElevenLabsClient } from 'elevenlabs';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
 import { connectDatabase } from '../../config/database';
 import { connectRedis } from '../../config/redis';
-import { interviewerAgent } from '../ai/interviewerAgent';
+import { interviewerAgent, Turn } from '../ai/interviewerAgent';
 import { sessionRepository } from '../../repositories/sessionRepository';
 import { livekitConfig } from '../../config/services';
 
-// Global audio track management (persistent across speech calls)
-let persistentAudioSource: AudioSource | null = null;
-let persistentAudioTrack: LocalAudioTrack | null = null;
-// let agentSpeaking = false;
+// Speaker state machine (single source of truth for who can speak)
+enum SpeakerState {
+  IDLE = 'IDLE',
+  SPEAKING = 'SPEAKING',
+  CANCELED = 'CANCELED',
+}
+
+// Speaker ownership lock (prevents re-entrancy corruption)
+let speakerState: SpeakerState = SpeakerState.IDLE;
+let currentAbortController: AbortController | null = null;
+
 async function main() {
   const [roomName, token, sessionId] = process.argv.slice(2);
 
@@ -70,13 +77,17 @@ async function main() {
   });
 
   // Connect to room using config
-  console.log(`Connecting agent to: ${livekitConfig.wsUrl}`);
+  console.log('🌐 [ROOM] Connecting to LiveKit...');
+  console.log(`   - WebSocket URL: ${livekitConfig.wsUrl}`);
+  console.log(`   - Room name: ${roomName}`);
   await room.connect(livekitConfig.wsUrl, token);
 
-  console.log('✓ AI agent connected to room');
+  console.log('✓ [ROOM] AI agent connected to room successfully');
 
   // Send initial greeting
-  await speakToCandidate(sessionId, room, "Hello! I'm your AI interviewer today. Are you ready to begin?");
+  console.log('👋 [INIT] Sending initial greeting to candidate...');
+  await speakToCandidate(room, "Hello! I'm your AI interviewer today. Are you ready to begin?");
+  console.log('✓ [INIT] Initial greeting complete\n');
 }
 
 async function handleCandidateAudio(sessionId: string, track: RemoteTrack, room: Room) {
@@ -104,59 +115,80 @@ async function handleCandidateAudio(sessionId: string, track: RemoteTrack, room:
   connection.on(LiveTranscriptionEvents.Transcript, async (data) => {
     const transcript = data.channel?.alternatives[0]?.transcript;
     
-    if (transcript && transcript.trim().length > 0) {
-      console.log(`📝 INTERIM: "${transcript}"`);
-      
-      // Only process final transcripts
-      if (data.is_final) {
-        console.log(`💬 FINAL: "${transcript}"`);
+    // Only process final transcripts (ignore interim noise)
+    if (!data.is_final) return;
+    if (!transcript || !transcript.trim()) return;
+    
+    const timestamp = new Date().toISOString();
+    console.log(`\n💬 [TRANSCRIPT] Final transcript received at ${timestamp}`);
+    console.log(`   - Text: "${transcript}"`);
+    console.log(`   - Length: ${transcript.length} characters`);
+    console.log(`   - Current speaker state: ${speakerState}`);
+    
+    // If agent is speaking, interrupt immediately (candidate priority)
+    if (speakerState === SpeakerState.SPEAKING) {
+      console.log('⚡ [TRANSCRIPT] Candidate speaking while agent is active - interrupting');
+      cancelSpeech();
+    }
 
-        try {
-          // Save transcript
-          try {
-            await sessionRepository.addTranscript(sessionId, {
-              role: 'user',
-              content: transcript,
-              timestamp: new Date(),
-            });
-          } catch (dbError: unknown) {
-            const errorMsg = dbError instanceof Error ? dbError.message : String(dbError);
-            console.error('[TRANSCRIPT-DB] Failed to save user transcript:', {
-              sessionId,
-              transcript: transcript.substring(0, 50),
-              error: errorMsg,
-              details: dbError,
-            });
-            throw dbError;
-          }
-
-          // Process with AI
-          const response = await interviewerAgent.processUserMessage(sessionId, transcript);
-
-          // Save AI response transcript
-          try {
-            await sessionRepository.addTranscript(sessionId, {
-              role: 'assistant',
-              content: response,
-              timestamp: new Date(),
-            });
-          } catch (dbError: unknown) {
-            const errorMsg = dbError instanceof Error ? dbError.message : String(dbError);
-            console.error('[TRANSCRIPT-DB] Failed to save assistant transcript:', {
-              sessionId,
-              response: response.substring(0, 50),
-              error: errorMsg,
-              details: dbError,
-            });
-            throw dbError;
-          }
-
-          // Speak response
-          await speakToCandidate(sessionId, room, response);
-        } catch (processError) {
-          console.error('❌ Error processing transcript:', processError);
-        }
+    try {
+      console.log('💾 [TRANSCRIPT] Saving user transcript to database...');
+      // Save transcript
+      try {
+        await sessionRepository.addTranscript(sessionId, {
+          role: 'user',
+          content: transcript,
+          timestamp: new Date(),
+        });
+        console.log('✅ [TRANSCRIPT] User transcript saved successfully');
+      } catch (dbError: unknown) {
+        const errorMsg = dbError instanceof Error ? dbError.message : String(dbError);
+        console.error('❌ [TRANSCRIPT] Failed to save user transcript:');
+        console.error(`   - Session ID: ${sessionId}`);
+        console.error(`   - Transcript: ${transcript.substring(0, 50)}...`);
+        console.error(`   - Error: ${errorMsg}`);
+        throw dbError;
       }
+
+      console.log('🤖 [AI] Processing user message with AI agent...');
+      const aiStartTime = Date.now();
+      // Process with AI - returns array of turns
+      const turns = await interviewerAgent.processUserMessage(sessionId, transcript);
+      const aiProcessTime = Date.now() - aiStartTime;
+      
+      console.log(`✅ [AI] AI processing complete (${aiProcessTime}ms)`);
+      console.log(`   - Generated turns: ${turns.length}`);
+      turns.forEach((turn, idx) => {
+        console.log(`   - Turn ${idx + 1}: ${turn.text.length} chars, pause ${turn.pauseAfterMs}ms`);
+      });
+
+      // Save full AI response as concatenated text
+      const fullResponse = turns.map(t => t.text).join(' ');
+      console.log(`💾 [TRANSCRIPT] Saving AI response to database (${fullResponse.length} chars)...`);
+      
+      try {
+        await sessionRepository.addTranscript(sessionId, {
+          role: 'assistant',
+          content: fullResponse,
+          timestamp: new Date(),
+        });
+        console.log('✅ [TRANSCRIPT] AI transcript saved successfully');
+      } catch (dbError: unknown) {
+        const errorMsg = dbError instanceof Error ? dbError.message : String(dbError);
+        console.error('❌ [TRANSCRIPT] Failed to save AI transcript:');
+        console.error(`   - Session ID: ${sessionId}`);
+        console.error(`   - Response length: ${fullResponse.length} chars`);
+        console.error(`   - Error: ${errorMsg}`);
+        throw dbError;
+      }
+
+      // Speak response turns one at a time with pauses
+      console.log('🎤 [TRANSCRIPT] Initiating speech for AI response...');
+      await speakTurnsToCandidate(sessionId, room, turns);
+    } catch (processError) {
+      console.error('❌ [TRANSCRIPT] Error processing transcript:');
+      console.error('   - Error:', processError);
+      console.error('   - Stack:', processError instanceof Error ? processError.stack : 'N/A');
     }
   });
 
@@ -195,7 +227,6 @@ async function handleCandidateAudio(sessionId: string, track: RemoteTrack, room:
         for await (const frame of frameIterator) {
           if (!isStreaming) {
             console.log('✅ Audio streaming stopped');
-            connection.finish();
             break;
           }
 
@@ -227,7 +258,6 @@ async function handleCandidateAudio(sessionId: string, track: RemoteTrack, room:
         }
         
         console.log(`✅ Audio stream ended: ${frameCount} frames, ${bytesSent} bytes sent`);
-        connection.finish();
       } catch (streamError) {
         console.error('❌ Audio streaming error:', streamError);
         isStreaming = false;
@@ -244,84 +274,267 @@ async function handleCandidateAudio(sessionId: string, track: RemoteTrack, room:
   }
 }
 
-async function speakToCandidate(_sessionId: string, room: Room, text: string) {
-  try {
-    console.log(`🤖 AI speaking: "${text}"`);
+async function speakTurnsToCandidate(
+  _sessionId: string,
+  room: Room,
+  turns: Turn[]
+) {
+  console.log('🎭 [TURNS] Starting multi-turn speech sequence');
+  console.log(`   - Total turns: ${turns.length}`);
+  
+  for (let i = 0; i < turns.length; i++) {
+    const turn = turns[i];
+    
+    console.log(`\n🔢 [TURNS] Processing turn ${i + 1}/${turns.length}`);
+    console.log(`   - Text length: ${turn.text.length} characters`);
+    console.log(`   - Pause after: ${turn.pauseAfterMs}ms`);
+    
+    // Check if canceled between turns
+    if (speakerState === SpeakerState.CANCELED) {
+      console.log('🛑 [TURNS] Speech canceled - stopping remaining turns');
+      speakerState = SpeakerState.IDLE;
+      return;
+    }
 
+    console.log(`📢 [TURNS] Turn ${i + 1} text: "${turn.text.substring(0, 100)}..."`);
+    await speakToCandidate(room, turn.text);
+    
+    // Natural pause between turns
+    if (i < turns.length - 1) {
+      console.log(`⏸️  [TURNS] Inter-turn pause: ${turn.pauseAfterMs}ms`);
+      await sleep(turn.pauseAfterMs);
+    }
+  }
+  
+  console.log('✅ [TURNS] All turns completed successfully\n');
+}
+
+/**
+ * Speak to candidate with atomic speaker lock.
+ * 
+ * Key design:
+ * - Fresh AudioSource + AudioTrack per turn (no persistent state)
+ * - AbortController for mid-word cancellation
+ * - Guaranteed cleanup (track unpublished even on error)
+ * - Re-entrancy safe (cancels previous speech if called during active speech)
+ */
+async function speakToCandidate(room: Room, text: string) {
+  const startTime = Date.now();
+  console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  console.log('🎤 [VOICE] Starting speech generation');
+  console.log(`📝 [VOICE] Text length: ${text.length} characters`);
+  console.log(`📝 [VOICE] Text preview: "${text.substring(0, 100)}..."`);
+  console.log(`🔒 [VOICE] Current speaker state: ${speakerState}`);
+
+  // Cancel any currently active speech (re-entrancy protection)
+  if (speakerState === SpeakerState.SPEAKING) {
+    console.log('⚠️  [VOICE] Detected concurrent speech - canceling previous');
+    cancelSpeech();
+  }
+
+  speakerState = SpeakerState.SPEAKING;
+  const abortController = new AbortController();
+  currentAbortController = abortController;
+  console.log('✅ [VOICE] Speaker lock acquired - state set to SPEAKING');
+
+  let audioSource: AudioSource | null = null;
+  let audioTrack: LocalAudioTrack | null = null;
+
+  try {
     if (!room.localParticipant) {
       throw new Error('Local participant not available');
     }
+    console.log('✅ [VOICE] Room participant verified');
 
-    if (!process.env.ELEVENLABS_API_KEY) {
-      throw new Error('ELEVENLABS_API_KEY is not set in environment variables');
+    // Small human pause before speaking
+    console.log('⏱️  [VOICE] Pre-speech pause: 300ms');
+    await sleep(300);
+    if (abortController.signal.aborted) {
+      console.log('🛑 [VOICE] Aborted during pre-speech pause');
+      return;
     }
 
+    console.log('🎵 [VOICE] Initializing ElevenLabs client');
     const elevenlabs = new ElevenLabsClient({
-      apiKey: process.env.ELEVENLABS_API_KEY
+      apiKey: process.env.ELEVENLABS_API_KEY!,
     });
 
-    console.log('🎵 Generating speech with ElevenLabs...');
+    // Generate TTS stream
+    const ttsStartTime = Date.now();
+    console.log(`🌐 [VOICE] Requesting TTS from ElevenLabs...`);
+    console.log(`   - Voice ID: ${process.env.ELEVENLABS_VOICE_ID || 'nPczCjzI2devNBz1zQrb'}`);
+    console.log(`   - Model: eleven_flash_v2_5`);
+    console.log(`   - Format: pcm_48000 (48kHz, 16-bit, mono PCM)`);
     
-    // Generate audio stream from ElevenLabs
-    const audioStream = await elevenlabs.textToSpeech.convertAsStream(
+    const ttsStream = await elevenlabs.textToSpeech.convertAsStream(
       process.env.ELEVENLABS_VOICE_ID || 'nPczCjzI2devNBz1zQrb',
       {
-        text: text,
+        text,
         model_id: 'eleven_flash_v2_5',
-        output_format: 'pcm_16000'
+        output_format: 'pcm_48000',
       }
     );
-
-    // Create or reuse persistent audio source/track
-    if (!persistentAudioSource || !persistentAudioTrack) {
-      console.log('🎙️ Creating persistent audio track...');
-      persistentAudioSource = new AudioSource(16000, 1);
-      persistentAudioTrack = LocalAudioTrack.createAudioTrack('agent-voice', persistentAudioSource);
-      
-      // Publish track (LiveKit SDK requires options parameter)
-      const opts = {};
-      await room.localParticipant.publishTrack(persistentAudioTrack, opts as Parameters<typeof room.localParticipant.publishTrack>[1]);
-      console.log('✅ Persistent audio track published');
-    }
-
-    // Stream audio data to LiveKit
-    const chunks: Buffer[] = [];
-    for await (const chunk of audioStream) {
-      chunks.push(chunk);
-    }
-
-    const audioBuffer = Buffer.concat(chunks);
-    console.log(`✅ Audio received (${audioBuffer.length} bytes)`);
     
-    // Convert to Int16Array
-    const pcmData = new Int16Array(
-      audioBuffer.buffer,
-      audioBuffer.byteOffset,
-      audioBuffer.length / 2
+    const ttsConnectTime = Date.now() - ttsStartTime;
+    console.log(`✅ [VOICE] TTS stream ready (${ttsConnectTime}ms connection time)`);
+
+    if (abortController.signal.aborted) {
+      console.log('🛑 [VOICE] Aborted after TTS connection');
+      return;
+    }
+
+    // Create FRESH audio track for this turn (no shared state)
+    console.log('🎙️  [VOICE] Creating fresh AudioSource + AudioTrack');
+    audioSource = new AudioSource(48000, 1);
+    console.log('   - Sample rate: 48000 Hz');
+    console.log('   - Channels: 1 (mono)');
+    
+    audioTrack = LocalAudioTrack.createAudioTrack('agent-voice', audioSource);
+    console.log(`   - Track created with name: "agent-voice"`);
+    
+    const opts = {};
+    const publishStartTime = Date.now();
+    await room.localParticipant.publishTrack(
+      audioTrack,
+      opts as Parameters<typeof room.localParticipant.publishTrack>[1]
     );
+    const publishTime = Date.now() - publishStartTime;
+    console.log(`✅ [VOICE] Track published to LiveKit (${publishTime}ms)`);
+    console.log(`   - Track SID: ${audioTrack.sid}`);
 
-    // Stream audio frames to persistent track
-    const chunkSize = 1600; // 100ms at 16kHz
-    for (let i = 0; i < pcmData.length; i += chunkSize) {
-      const chunk = pcmData.slice(i, Math.min(i + chunkSize, pcmData.length));
-      const audioFrame = new AudioFrame(
-        chunk,
-        16000,
-        1,
-        chunk.length
+    // Stream PCM frames with real-time pacing
+    console.log('🎧 [VOICE] Starting frame-by-frame audio playback...');
+    let chunkCount = 0;
+    let totalBytes = 0;
+    let totalSamples = 0;
+    const playbackStartTime = Date.now();
+
+    for await (const chunk of ttsStream) {
+      chunkCount++;
+      const chunkReceiveTime = Date.now();
+      
+      // Check cancellation
+      if (abortController.signal.aborted) {
+        console.log(`🛑 [VOICE] Speech canceled mid-stream at chunk ${chunkCount}`);
+        break;
+      }
+
+      totalBytes += chunk.length;
+      const chunkSamples = chunk.length / 2; // 16-bit = 2 bytes per sample
+      totalSamples += chunkSamples;
+      const audioDurationMs = (totalSamples / 48000) * 1000;
+      
+      console.log(`📦 [VOICE] TTS Chunk ${chunkCount}:`);
+      console.log(`   - Size: ${chunk.length} bytes (${chunkSamples} samples)`);
+      console.log(`   - Cumulative: ${totalBytes} bytes total`);
+      console.log(`   - Audio duration: ${audioDurationMs.toFixed(1)}ms`);
+      console.log(`   - Elapsed time: ${Date.now() - playbackStartTime}ms`);
+
+      const pcm = new Int16Array(
+        chunk.buffer,
+        chunk.byteOffset,
+        chunk.byteLength / 2
       );
-      await persistentAudioSource.captureFrame(audioFrame);
-      await sleep(100);
+
+      console.log(`🎵 [VOICE] Creating AudioFrame with ${pcm.length} samples`);
+      const frame = new AudioFrame(pcm, 48000, 1, pcm.length);
+      
+      const captureStartTime = Date.now();
+      audioSource.captureFrame(frame);
+      const captureTime = Date.now() - captureStartTime;
+      console.log(`✅ [VOICE] Frame captured to LiveKit (${captureTime}ms)`);
+
+      // Real-time pacing (18ms per frame ≈ 20ms at 48kHz)
+      console.log(`⏱️  [VOICE] Pacing delay: 18ms`);
+      await sleep(18);
+      
+      const chunkProcessTime = Date.now() - chunkReceiveTime;
+      console.log(`⏲️  [VOICE] Chunk ${chunkCount} total processing: ${chunkProcessTime}ms`);
     }
 
-    console.log('✅ Audio playback complete');
+    const totalPlaybackTime = Date.now() - playbackStartTime;
+    const expectedAudioDuration = (totalSamples / 48000) * 1000;
     
-  } catch (error) {
-    console.error('❌ Failed to speak:', error);
+    console.log('✅ [VOICE] Speech stream completed');
+    console.log(`📊 [VOICE] Playback Statistics:`);
+    console.log(`   - Total chunks: ${chunkCount}`);
+    console.log(`   - Total bytes: ${totalBytes}`);
+    console.log(`   - Total samples: ${totalSamples}`);
+    console.log(`   - Expected audio duration: ${expectedAudioDuration.toFixed(0)}ms`);
+    console.log(`   - Actual playback time: ${totalPlaybackTime}ms`);
+    console.log(`   - Time difference: ${(totalPlaybackTime - expectedAudioDuration).toFixed(0)}ms`);
+
+    // Natural trailing pause
+    console.log('⏱️  [VOICE] Post-speech pause: 200ms');
+    await sleep(200);
+
+    // Natural trailing pause
+    console.log('⏱️  [VOICE] Post-speech pause: 200ms');
+    await sleep(200);
+
+  } catch (err) {
+    if (!abortController.signal.aborted) {
+      console.error('❌ [VOICE] Error during speech playback:');
+      console.error('   - Error type:', err instanceof Error ? err.constructor.name : typeof err);
+      console.error('   - Error message:', err instanceof Error ? err.message : String(err));
+      console.error('   - Stack trace:', err instanceof Error ? err.stack : 'N/A');
+    } else {
+      console.log('ℹ️  [VOICE] Error ignored due to cancellation');
+    }
+  } finally {
+    const cleanupStartTime = Date.now();
+    console.log('🧹 [VOICE] Starting cleanup...');
+    
+    // ALWAYS cleanup track (prevent zombie audio sources)
+    if (audioTrack && room.localParticipant && audioTrack.sid) {
+      try {
+        console.log(`🗑️  [VOICE] Unpublishing track: ${audioTrack.sid}`);
+        await room.localParticipant.unpublishTrack(audioTrack.sid);
+        const unpublishTime = Date.now() - cleanupStartTime;
+        console.log(`✅ [VOICE] Track unpublished successfully (${unpublishTime}ms)`);
+      } catch (e) {
+        console.log('⚠️  [VOICE] Track unpublish failed (may already be gone):', e instanceof Error ? e.message : String(e));
+      }
+    } else {
+      console.log('ℹ️  [VOICE] No track to unpublish');
+    }
+
+    // Reset speaker state if this is still the active controller
+    if (currentAbortController === abortController) {
+      currentAbortController = null;
+      speakerState = SpeakerState.IDLE;
+      console.log('🔓 [VOICE] Speaker lock released - state set to IDLE');
+    } else {
+      console.log('⚠️  [VOICE] Abort controller mismatch - state not reset');
+    }
+    
+    const totalTime = Date.now() - startTime;
+    console.log(`⏲️  [VOICE] Total function time: ${totalTime}ms`);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
   }
 }
 
-// Helper function for timing audio frames
+/**
+ * Cancel currently active speech (mid-word).
+ * Sets state to CANCELED and aborts TTS stream.
+ */
+function cancelSpeech() {
+  console.log('🔇 [CANCEL] Cancel speech requested');
+  console.log(`   - Current state: ${speakerState}`);
+  console.log(`   - Has abort controller: ${!!currentAbortController}`);
+  
+  if (currentAbortController && speakerState === SpeakerState.SPEAKING) {
+    console.log('✅ [CANCEL] Aborting active speech');
+    speakerState = SpeakerState.CANCELED;
+    currentAbortController.abort();
+    currentAbortController = null;
+    console.log('✅ [CANCEL] Speech successfully canceled');
+  } else {
+    console.log('⚠️  [CANCEL] No active speech to cancel');
+  }
+}
+
+// Helper function for timing
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
