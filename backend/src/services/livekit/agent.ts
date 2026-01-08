@@ -363,14 +363,14 @@ async function speakToCandidate(room: Room, text: string) {
     const ttsStartTime = Date.now();
     console.log(`🌐 [VOICE] Requesting TTS from ElevenLabs...`);
     console.log(`   - Voice ID: ${process.env.ELEVENLABS_VOICE_ID || 'nPczCjzI2devNBz1zQrb'}`);
-    console.log(`   - Model: eleven_flash_v2_5`);
+    console.log(`   - Model: eleven_turbo_v2_5`);
     console.log(`   - Format: pcm_48000 (48kHz, 16-bit, mono PCM)`);
     
     const ttsStream = await elevenlabs.textToSpeech.convertAsStream(
       process.env.ELEVENLABS_VOICE_ID || 'nPczCjzI2devNBz1zQrb',
       {
         text,
-        model_id: 'eleven_flash_v2_5',
+        model_id: 'eleven_turbo_v2_5',
         output_format: 'pcm_48000',
       }
     );
