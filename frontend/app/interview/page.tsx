@@ -165,15 +165,30 @@ export default function InterviewPage() {
 
   const handleCodeChange = (newCode: string) => {
     setCode(newCode);
-    
-    // Debounce autosave
+    // Debounce both autosave and sendText
     if (autosaveTimerRef.current) {
       clearTimeout(autosaveTimerRef.current);
     }
-    
     autosaveTimerRef.current = setTimeout(() => {
       saveCode(newCode);
-    }, 2000); // Save after 2 seconds of inactivity
+      // UPDATED: Send code to agent via LiveKit Text Stream
+      if (isConnected && livekitHookResult.room) {
+        const localParticipant = livekitHookResult.room.localParticipant;
+        try {
+          // .sendText() automatically handles the stream creation and closing
+          // for the string provided. This is the "Send all at once" pattern.
+          localParticipant.sendText(newCode, {
+            topic: "code-update",
+          }).then((info) => {
+            console.log(`💻 [STREAM_SENT] Sent code update. ID: ${info.id}`);
+          }).catch(err => {
+            console.error('❌ [STREAM_SEND_ERROR]', err);
+          });
+        } catch (err) {
+          console.error('❌ [CODE_SEND_CRITICAL_ERROR]', err);
+        }
+      }
+    }, 2000);
   };
 
   const handleToggleMute = () => {
