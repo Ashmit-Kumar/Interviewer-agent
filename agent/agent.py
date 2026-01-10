@@ -3,6 +3,7 @@ LiveKit AI Interview Agent
 Handles voice-based technical interviews with live coding
 Uses modern AgentSession API
 """
+"hello"
 
 import os
 import asyncio
