@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { RemoteTrack } from "livekit-client";
 import CodeEditor from "@/components/code-editor/CodeEditor";
 import { useLiveKit } from "@/lib/hooks/useLiveKit";
 import { sessionApi } from "@/lib/api/sessionApi";
@@ -120,7 +121,7 @@ export default function InterviewPage() {
       onDisconnected: () => {
         console.log("Disconnected from LiveKit room");
       },
-      onTrackSubscribed: (track) => {
+      onTrackSubscribed: (track: RemoteTrack) => {
         console.log("AI audio track subscribed");
       },
     };
