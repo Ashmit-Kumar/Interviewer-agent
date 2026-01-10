@@ -10,18 +10,29 @@ export class SessionController {
   startSession = async (_req: Request, res: Response, next: NextFunction) => {
     try {
       const sessionId = uuidv4();
+      console.log(`\n${'='.repeat(60)}`);
+      console.log(`📝 Creating new session: ${sessionId}`);
+      console.log(`${'='.repeat(60)}`);
 
       // Initialize interview orchestrator
       const { question } = await interviewOrchestrator.initializeInterview(sessionId);
+      console.log(`✅ Question selected: ${question.title}`);
 
       // Create session in MongoDB
-      await sessionRepository.create({
+      const createdSession = await sessionRepository.create({
         sessionId,
         status: 'active',
         questionsAsked: [question.title],
         finalCode: '',
         transcripts: [],
       });
+      
+      console.log(`✅ Session created in MongoDB:`);
+      console.log(`   SessionId: ${createdSession.sessionId}`);
+      console.log(`   Status: ${createdSession.status}`);
+      console.log(`   Questions: ${createdSession.questionsAsked.length}`);
+      console.log(`   Database: ${createdSession.constructor.modelName}`);
+      console.log(`${'='.repeat(60)}\n`);
 
       // Return session data (frontend will call /api/livekit/room separately)
       res.status(201).json({
@@ -37,6 +48,7 @@ export class SessionController {
         },
       });
     } catch (error) {
+      console.error(`❌ Failed to create session:`, error);
       next(error);
     }
   };

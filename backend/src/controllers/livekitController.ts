@@ -23,17 +23,19 @@ export class LiveKitController {
 
       const roomName = `interview-${sessionId}`;
 
-      // Create room via RoomService
+      // Create room via RoomService with metadata for Python agent
       await this.roomService.createRoom({
         name: roomName,
         emptyTimeout: 3600, // 1 hour
         maxParticipants: 2,
+        metadata: JSON.stringify({ sessionId }), // Add metadata here for agent
       });
 
       console.log(`✓ LiveKit room created: ${roomName}`);
+      console.log(`  Room metadata: { sessionId: "${sessionId}" }`);
 
-      // Generate candidate token with session metadata (as JSON for Python agent)
-      const candidateToken = await this.generateToken(roomName, 'candidate', sessionId);
+      // Generate candidate token (no metadata needed here)
+      const candidateToken = await this.generateToken(roomName, 'candidate');
 
       // Validate token before sending
       if (!candidateToken || candidateToken.length === 0) {
@@ -64,11 +66,9 @@ export class LiveKitController {
     }
   }
 
-  private async generateToken(roomName: string, identity: string, sessionId?: string): Promise<string> {
+  private async generateToken(roomName: string, identity: string): Promise<string> {
     const at = new AccessToken(livekitConfig.apiKey, livekitConfig.apiSecret, {
       identity,
-      // Send sessionId as JSON metadata for Python agent
-      ...(sessionId && { metadata: JSON.stringify({ sessionId }) }),
     });
     
     at.addGrant({
