@@ -30,6 +30,7 @@ export function useLiveKit({
   const [isConnected, setIsConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isAISpeaking, setIsAISpeaking] = useState(false);
+  const [isAIThinking, setIsAIThinking] = useState(false);
   const [audioContextRestricted, setAudioContextRestricted] = useState(false);
   
   const roomRef = useRef<Room | null>(null);
@@ -120,16 +121,34 @@ export function useLiveKit({
     });
 
     room.on(RoomEvent.DataReceived, (payload, participant) => {
+      // Raw logging to debug missing messages
       try {
+        console.log('📥 [RAW_DATA_RECEIVED] From:', participant?.identity);
         const decoder = new TextDecoder();
-        const data = JSON.parse(decoder.decode(payload));
-        
-        if (data.type === 'transcript' && data.role === 'assistant') {
-          console.log('📝 [TRANSCRIPT_RECEIVED]', data.content);
-          onTranscriptReceived?.(data);
+        const decodedString = decoder.decode(payload);
+        console.log('📄 [DECODED_DATA]:', decodedString);
+
+        const data = JSON.parse(decodedString);
+
+        if (data.type === 'transcript' && data.content) {
+          console.log(`✨ [MATCHED_TRANSCRIPT] ${data.role}:`, data.content);
+          onTranscriptReceived?.({
+            role: data.role,
+            content: data.content,
+            timestamp: Date.now(),
+          });
+          return;
+        }
+
+        if (data.type === 'state' && data.state) {
+          console.log('🧠 [STATE_UPDATE]:', data.state);
+          setIsAIThinking(data.state === 'thinking');
+          if (data.state === 'speaking') setIsAISpeaking(true);
+          if (data.state === 'listening') setIsAISpeaking(false);
+          return;
         }
       } catch (e) {
-        console.error('❌ [DATA_PARSE_ERROR]', e);
+        console.error('❌ [DATA_PARSE_ERROR] Payload was not JSON or decode failed:', e);
       }
     });
 
@@ -192,6 +211,7 @@ export function useLiveKit({
     isConnected,
     isMuted,
     isAISpeaking,
+    isAIThinking,
     audioContextRestricted,
     startAudio,
     toggleMute,

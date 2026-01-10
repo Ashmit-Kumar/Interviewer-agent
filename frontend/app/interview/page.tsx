@@ -39,6 +39,7 @@ export default function InterviewPage() {
   } | null>(null);
   
   const autosaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   // Load session data from sessionStorage
   useEffect(() => {
@@ -145,6 +146,7 @@ export default function InterviewPage() {
     isConnected,
     isMuted,
     isAISpeaking,
+    isAIThinking,
     audioContextRestricted,
     startAudio,
     toggleMute,
@@ -190,6 +192,11 @@ export default function InterviewPage() {
       }
     }, 2000);
   };
+
+  // Auto-scroll transcript to bottom when messages change
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   const handleToggleMute = () => {
     toggleMute();
@@ -334,11 +341,22 @@ export default function InterviewPage() {
                   </div>
                   <div className="flex-1">
                     <p className="text-xs text-slate-300 font-medium">
-                      {!isConnected
-                        ? "Connecting to voice..."
-                        : isAISpeaking
-                        ? "AI is speaking..."
-                        : "AI is listening..."}
+                      {!isConnected ? (
+                        "Connecting to voice..."
+                      ) : isAIThinking ? (
+                        <span className="flex items-center gap-2">
+                          AI Chris is thinking
+                          <span className="flex gap-1">
+                            <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce"></span>
+                            <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.15s]"></span>
+                            <span className="w-1 h-1 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.3s]"></span>
+                          </span>
+                        </span>
+                      ) : isAISpeaking ? (
+                        "AI is speaking..."
+                      ) : (
+                        "AI is listening..."
+                      )}
                     </p>
                   </div>
                 </div>
@@ -426,6 +444,7 @@ export default function InterviewPage() {
                   </div>
                 </div>
                 ))}
+                <div ref={transcriptEndRef} />
               </>
               )}
             </div>
