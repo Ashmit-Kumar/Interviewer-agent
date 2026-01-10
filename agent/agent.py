@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import JobContext, Agent, AgentSession, AgentServer, llm, tokenize
 from livekit.plugins import silero, groq, deepgram, elevenlabs
+import time
+
 
 load_dotenv()
 logging.getLogger('pymongo').setLevel(logging.WARNING)
@@ -18,6 +20,9 @@ sessions_collection = db["sessions"]
 
 # Global reference to the current LiveKit room for log-based forwarding
 CURRENT_ROOM = None
+# Global refs to allow log-forwarder to trigger shutdown when needed
+CURRENT_SESSION = None
+CURRENT_CTX = None
 
 
 class UserTranscriptLogHandler(logging.Handler):
@@ -68,6 +73,37 @@ class UserTranscriptLogHandler(logging.Handler):
                     print('✅ [LOG_FORWARDED] forwarded user transcript from SDK log')
                 except Exception as e:
                     print(f'❌ [LOG_FORWARD_FAILED] {e}')
+
+                # Detect exit phrases in SDK logs and trigger a shutdown if seen
+                try:
+                    t = text.lower()
+                    exit_phrases = ["exit", "end interview", "end", "goodbye", "done", "thank you"]
+                    if any(p in t for p in exit_phrases):
+                        print('🛑 [LOG_FORWARD] Exit phrase detected in SDK log')
+                        loop2 = None
+                        try:
+                            loop2 = asyncio.get_event_loop()
+                        except RuntimeError:
+                            pass
+
+                        async def _maybe_shutdown():
+                            if CURRENT_CTX is None or CURRENT_SESSION is None:
+                                print('⚠️ [LOG_FORWARD] No CURRENT_SESSION/CTX set, cannot shutdown')
+                                return
+                            try:
+                                await shutdown_session(CURRENT_CTX, CURRENT_SESSION)
+                            except Exception as se:
+                                print(f'❌ [LOG_SHUTDOWN_FAILED] {se}')
+
+                        if loop2 and loop2.is_running():
+                            loop2.call_soon_threadsafe(lambda: asyncio.create_task(_maybe_shutdown()))
+                        else:
+                            try:
+                                asyncio.run(_maybe_shutdown())
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
 
             if loop and loop.is_running():
                 loop.call_soon_threadsafe(lambda: asyncio.create_task(_broadcast()))
@@ -188,8 +224,22 @@ async def entrypoint(ctx: JobContext):
             api_key=os.getenv("ELEVENLABS_API_KEY"),
             model="eleven_multilingual_v2",
             voice_id=os.getenv("ELEVENLABS_VOICE_ID")
-        )
+        ),
     )
+
+    # expose session and ctx for log-forwarder based shutdown hooks
+    try:
+        global CURRENT_SESSION, CURRENT_CTX
+        CURRENT_SESSION = session
+        CURRENT_CTX = ctx
+        print('🔗 [CURRENT_SESSION_SET] session and ctx exposed for log forwarder')
+    except Exception as e:
+        print(f'❌ [CURRENT_SESSION_SET_ERROR] {e}')
+    # )
+
+    # Shared state for final code capture
+    final_code_holder = {"code": ""}
+    chat_history = []
 
     # --- TEXT STREAM HANDLER (Replaces data_received) ---
     
@@ -200,7 +250,8 @@ async def entrypoint(ctx: JobContext):
             code_content = await reader.read_all()
             
             if code_content:
-                # 1. Update the brain context
+                # 1. Update the brain context and capture final code
+                final_code_holder['code'] = code_content
                 assistant.update_code_context(code_content, session.chat_ctx)
                 
                 # 2. Trigger the LLM to generate a reply (mimics speech committed)
@@ -239,31 +290,50 @@ async def entrypoint(ctx: JobContext):
 
     @session.on("user_speech_committed")
     def on_user_speech(msg: llm.ChatMessage):
-        """Broadcast the user's transcript to the frontend when they finish speaking."""
-        # This print MUST show up in your terminal for the data to reach the frontend
-        print(f"🎯 [EVENT_TRIGGERED] user_speech_committed: {getattr(msg, 'content', None)}")
+        """Broadcast the user's transcript and detect exit phrases to shut down the session."""
         try:
-            if isinstance(msg.content, str) and msg.content.strip():
-                text = msg.content.strip()
-                payload = json.dumps({
-                    "type": "transcript",
-                    "role": "user",
-                    "content": text
-                })
+            if not msg or not getattr(msg, 'content', None):
+                return
+            text = str(msg.content).strip()
+            if not text:
+                return
 
-                print(f"📡 [DATA_SENDING] User transcript: {text[:120]}")
+            print(f"🎤 USER: {text}")
+            # Append to chat history for later evaluation
+            try:
+                chat_history.append({"role": "user", "content": text, "timestamp": time.time()})
+            except Exception:
+                pass
 
-                async def broadcast():
-                    try:
-                        await ctx.room.local_participant.publish_data(
-                            payload.encode('utf-8'),
-                            reliable=True
-                        )
-                        print(f"✅ [BROADCAST_SUCCESS] User transcript sent to frontend")
-                    except Exception as e:
-                        print(f"❌ [BROADCAST_ERROR] {e}")
+            payload = json.dumps({
+                "type": "transcript",
+                "role": "user",
+                "content": text
+            })
 
-                asyncio.create_task(broadcast())
+            async def broadcast_transcript():
+                try:
+                    await ctx.room.local_participant.publish_data(
+                        payload.encode('utf-8'),
+                        reliable=True
+                    )
+                    print("✅ [BROADCAST_SUCCESS] User transcript sent to frontend")
+                except Exception as e:
+                    print(f"❌ [BROADCAST_ERROR] {e}")
+
+            asyncio.create_task(broadcast_transcript())
+
+            # Exit detection - simple event-driven shutdown
+            t = text.lower()
+            exit_phrases = ["exit", "end", "goodbye", "done", "end interview", "thank you"]
+            if any(phrase in t for phrase in exit_phrases):
+                print("� EXIT DETECTED - Ending session")
+                # Say goodbye (non-blocking)
+                asyncio.create_task(session.generate_reply(
+                    instructions="Say exactly: 'Great work today, generating your results now, Thank you and goodbye!'"
+                ))
+                # Shutdown after goodbye finishes
+                asyncio.create_task(shutdown_session(ctx, session))
         except Exception as e:
             print(f"❌ [BROADCAST_EXCEPTION] {e}")
 
@@ -357,12 +427,177 @@ async def entrypoint(ctx: JobContext):
         instructions="Say exactly: 'Hi, I'm Chris, I'll be your interviewer today, Are you ready to begin?'"
     )
 
-    while True:
-        await asyncio.sleep(1)
+    # Let event handlers manage shutdown; keep the session alive
+    print("🎤 Session running - say 'end interview' to exit")
+    await asyncio.Future()
 
 if __name__ == "__main__":
     from livekit.agents import cli
     cli.run_app(server)
+
+
+async def handle_exit(session: AgentSession, session_id: str, final_code: str, chat_history: list, ctx: JobContext):
+    """Save session + trigger LLM evaluation, then close session and disconnect"""
+    try:
+        print(f"🛑 [HANDLE_EXIT] Saving session {session_id}")
+        await asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: sessions_collection.update_one(
+                {"sessionId": session_id},
+                {
+                    "$set": {
+                        "finalCode": final_code,
+                        "chatHistory": chat_history,
+                        "status": "completed",
+                        "endedAt": time.time()
+                    }
+                },
+                upsert=True
+            )
+        )
+
+        # Trigger async evaluation
+        asyncio.create_task(evaluate_session(session_id))
+
+        # Allow goodbye TTS to finish
+        await asyncio.sleep(2)
+
+        try:
+            await session.aclose()
+        except Exception as e:
+            print(f"❌ [SESSION_CLOSE_ERROR] {e}")
+
+        try:
+            await ctx.disconnect()
+        except Exception as e:
+            print(f"❌ [CTX_DISCONNECT_ERROR] {e}")
+
+        print(f"✅ [HANDLE_EXIT_COMPLETE] {session_id}")
+    except Exception as e:
+        print(f"❌ [EXIT_ERROR] {e}")
+
+
+async def shutdown_session(ctx: JobContext, session: AgentSession):
+    """Clean shutdown - saves session + disconnects"""
+    try:
+        # Allow goodbye TTS to finish
+        await asyncio.sleep(3)
+
+        # Save minimal session state to MongoDB
+        try:
+            session_id = ctx.room.name
+            sessions_collection.update_one(
+                {"sessionId": session_id},
+                {"$set": {
+                    "status": "completed",
+                    "endedAt": time.time()
+                }}
+            )
+            print(f"💾 Session {session_id} saved")
+        except Exception as e:
+            print(f"⚠️ Save failed: {e}")
+
+        # Notify frontend that the interview ended
+        try:
+            action_payload = json.dumps({"type": "action", "action": "END_INTERVIEW"})
+            try:
+                await ctx.room.local_participant.publish_data(action_payload.encode('utf-8'), reliable=True)
+                print("📣 [ACTION_SENT] END_INTERVIEW published to room")
+            except Exception as e:
+                # fallback to global room if available
+                try:
+                    if CURRENT_ROOM is not None:
+                        await CURRENT_ROOM.local_participant.publish_data(action_payload.encode('utf-8'), reliable=True)
+                        print("📣 [ACTION_SENT] END_INTERVIEW published via CURRENT_ROOM")
+                except Exception as e2:
+                    print(f"❌ [ACTION_SEND_FAILED] {e} / {e2}")
+        except Exception:
+            pass
+
+        # Run evaluation now (wait) so we can publish results while the room is still connected
+        try:
+            print("🔎 [EVALUATION] running evaluation before disconnect")
+            await evaluate_session(session_id)
+            print("🔎 [EVALUATION] completed and published (if possible)")
+        except Exception as e:
+            print(f"❌ [EVAL_FAILED] {e}")
+
+        # Give frontend a moment to receive evaluation/action packets
+        try:
+            await asyncio.sleep(1.0)
+        except Exception:
+            pass
+
+        # Clean disconnect (close session). Do not call ctx.disconnect() directly if unavailable
+        try:
+            await session.aclose()
+        except Exception as e:
+            print(f"❌ [SESSION_CLOSE_ERROR] {e}")
+
+        # Attempt to disconnect room if possible
+        try:
+            if hasattr(ctx, 'disconnect'):
+                await ctx.disconnect()
+            elif hasattr(ctx, 'room') and hasattr(ctx.room, 'disconnect'):
+                await ctx.room.disconnect()
+        except Exception as e:
+            print(f"❌ [CTX_DISCONNECT_ERROR] {e}")
+
+        print("✅ Session ended cleanly")
+    except Exception as e:
+        print(f"❌ [SHUTDOWN_ERROR] {e}")
+
+
+async def evaluate_session(session_id: str):
+    try:
+        session_data = sessions_collection.find_one({"sessionId": session_id})
+        if not session_data:
+            print(f"❌ [EVALUATE_MISSING] {session_id}")
+            return
+
+        evaluation_prompt = f"""
+        Analyze this coding interview:
+
+        Question: {session_data.get('questionsAsked', ['N/A'])[0]}
+        Final Code: {session_data.get('finalCode', '')[:4000]}
+        Transcript: {json.dumps(session_data.get('chatHistory', []))}
+
+        Return JSON:
+        {{
+            "strengths": ["list", "of", "positives"],
+            "improvements": ["list", "of", "improvements"],
+            "edgeCases": ["missing", "cases"],
+            "nextSteps": ["preparation", "tips"]
+        }}
+        """
+
+        llm_client = groq.LLM(model="llama-3.1-8b-instant")
+        response = await llm_client.chat(evaluation_prompt)
+
+        # Try to parse response content as JSON
+        try:
+            eval_json = json.loads(response.content)
+        except Exception:
+            eval_json = {"raw": response.content}
+
+        sessions_collection.update_one(
+            {"sessionId": session_id},
+            {"$set": {"evaluation": eval_json, "status": "evaluated"}}
+        )
+        print(f"✅ [EVALUATION_COMPLETE] {session_id}")
+    except Exception as e:
+        print(f"❌ [EVALUATION_ERROR] {e}")
+    # Try to publish evaluation back to the room if available
+    try:
+        payload = json.dumps({"type": "evaluation", "sessionId": session_id, "evaluation": eval_json})
+        if CURRENT_ROOM is not None:
+            try:
+                await CURRENT_ROOM.local_participant.publish_data(payload.encode('utf-8'), reliable=True)
+                print("📡 [EVALUATION_PUBLISHED] sent evaluation to room")
+            except Exception as e:
+                print(f"❌ [EVAL_PUBLISH_FAILED] {e}")
+    except Exception:
+        pass
 
 
 

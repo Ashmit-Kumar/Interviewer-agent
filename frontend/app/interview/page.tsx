@@ -39,6 +39,7 @@ export default function InterviewPage() {
   } | null>(null);
   
   const autosaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const endCallRef = useRef<(() => void) | null>(null);
   const transcriptEndRef = useRef<HTMLDivElement | null>(null);
 
   // Load session data from sessionStorage
@@ -136,6 +137,15 @@ export default function InterviewPage() {
           },
         ]);
       },
+      onActionReceived: (action: string) => {
+        if (action === 'END_INTERVIEW') {
+          try {
+            endCallRef.current && endCallRef.current();
+          } catch (e) {
+            console.error('Failed to auto end call from action', e);
+          }
+        }
+      },
     };
   }, [livekitConfig?.token, livekitConfig?.wsUrl, livekitConfig?.roomName]);
 
@@ -226,6 +236,12 @@ export default function InterviewPage() {
       setIsEnding(false);
     }
   };
+
+  // keep a stable ref to the end call handler for incoming actions
+  useEffect(() => {
+    endCallRef.current = handleEndCall;
+    return () => { endCallRef.current = null; };
+  }, [handleEndCall]);
 
   // Show loading state
   if (isLoading || !livekitConfig) {

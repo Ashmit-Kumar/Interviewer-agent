@@ -16,6 +16,7 @@ interface UseLiveKitOptions {
   onDisconnected?: () => void;
   onTrackSubscribed?: (track: RemoteTrack) => void;
   onTranscriptReceived?: (transcript: { role: string; content: string; timestamp: number }) => void;
+  onActionReceived?: (action: string) => void;
 }
 
 export function useLiveKit({
@@ -26,6 +27,7 @@ export function useLiveKit({
   onDisconnected,
   onTrackSubscribed,
   onTranscriptReceived,
+  onActionReceived,
 }: UseLiveKitOptions) {
   const [isConnected, setIsConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -145,6 +147,11 @@ export function useLiveKit({
           setIsAIThinking(data.state === 'thinking');
           if (data.state === 'speaking') setIsAISpeaking(true);
           if (data.state === 'listening') setIsAISpeaking(false);
+          return;
+        }
+        if (data.type === 'action' && data.action) {
+          console.log('🏁 [ACTION_RECEIVED]:', data.action);
+          onActionReceived?.(data.action);
           return;
         }
       } catch (e) {
