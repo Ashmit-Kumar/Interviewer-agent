@@ -1,0 +1,18 @@
+livekit-agents>=0.10.0
+livekit-plugins-deepgram>=0.5.0
+livekit-plugins-elevenlabs>=0.5.0
+livekit-plugins-silero>=0.5.0
+livekit-plugins-groq>=0.5.0
+
+pymongo>=4.6.0
+python-dotenv>=1.0.0
+
+
+
+# livekit-agents>=0.9.0
+# livekit-plugins-deepgram
+# livekit-plugins-elevenlabs
+# livekit-plugins-silero
+# livekit-plugins-groq
+# pymongo>=4.6.0
+# python-dotenv>=1.0.0
