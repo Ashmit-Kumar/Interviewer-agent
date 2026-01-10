@@ -31,7 +31,7 @@ export class SessionController {
       console.log(`   SessionId: ${createdSession.sessionId}`);
       console.log(`   Status: ${createdSession.status}`);
       console.log(`   Questions: ${createdSession.questionsAsked.length}`);
-      console.log(`   Database: ${createdSession.constructor.modelName}`);
+      // console.log(`   Database: ${createdSession.constructor.modelName}`);
       console.log(`${'='.repeat(60)}\n`);
 
       // Return session data (frontend will call /api/livekit/room separately)

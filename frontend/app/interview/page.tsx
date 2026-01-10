@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import CodeEditor from "@/components/code-editor/CodeEditor";
 import { useLiveKit } from "@/lib/hooks/useLiveKit";
@@ -105,9 +105,12 @@ export default function InterviewPage() {
     };
   }, [sessionId]);
 
-  // Initialize LiveKit connection ONLY when config is ready
-  const livekitHookResult = useLiveKit(
-    livekitConfig ? {
+  // Memoize LiveKit options to prevent re-renders
+  const livekitOptions = useMemo(() => {
+    if (!livekitConfig?.token) {
+      return { roomName: "", token: "", wsUrl: "" };
+    }
+    return {
       roomName: livekitConfig.roomName,
       token: livekitConfig.token,
       wsUrl: livekitConfig.wsUrl,
@@ -120,17 +123,18 @@ export default function InterviewPage() {
       onTrackSubscribed: (track) => {
         console.log("AI audio track subscribed");
       },
-    } : {
-      roomName: "",
-      token: "",
-      wsUrl: "",
-    }
-  );
+    };
+  }, [livekitConfig?.token, livekitConfig?.wsUrl, livekitConfig?.roomName]);
+
+  // Initialize LiveKit connection with memoized options
+  const livekitHookResult = useLiveKit(livekitOptions);
 
   const {
     isConnected,
     isMuted,
     isAISpeaking,
+    audioContextRestricted,
+    startAudio,
     toggleMute,
     disconnect,
   } = livekitHookResult;
@@ -220,6 +224,22 @@ export default function InterviewPage() {
 
   return (
     <div className="h-screen flex flex-col bg-gradient-to-br from-[#0f172a] via-[#111827] to-[#0f172a]">
+      {/* Autoplay Recovery Overlay */}
+      {audioContextRestricted && (
+        <div className="fixed inset-0 bg-slate-900/90 z-[100] flex items-center justify-center backdrop-blur-md">
+          <div className="text-center p-8 bg-slate-800 rounded-2xl border border-indigo-500 shadow-2xl">
+            <h2 className="text-xl font-bold text-white mb-2">Voice System Ready</h2>
+            <p className="text-slate-400 mb-6">Click below to start the audio session.</p>
+            <button 
+              onClick={startAudio}
+              className="px-10 py-4 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-bold transition-transform hover:scale-105"
+            >
+              Enable Audio & Start
+            </button>
+          </div>
+        </div>
+      )}
+
       {isEnding && (
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-md z-50 flex items-center justify-center">
           <div className="bg-slate-800/80 backdrop-blur-xl rounded-2xl p-8 shadow-2xl shadow-indigo-500/10 max-w-md w-full mx-4 border border-white/10">
