@@ -22,3 +22,5 @@ temp/
 .parcel-cache/
 .next/
 .vercel/
+src/services/livekit/agent.md
+src/services/livekit/agent-old.ts

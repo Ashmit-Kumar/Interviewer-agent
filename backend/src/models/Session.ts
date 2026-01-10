@@ -12,6 +12,7 @@ export interface ISession extends Document {
     content: string;
     timestamp: Date;
   }>;
+  agentNotes?: string[];  // Notes saved by Python agent during interview
   evaluation?: {
     strengths: string[];
     improvements: string[];
@@ -64,6 +65,9 @@ const SessionSchema: Schema = new Schema(
         type: Date,
         default: Date.now,
       },
+    }],
+    agentNotes: [{
+      type: String,
     }],
     evaluation: {
       strengths: [String],

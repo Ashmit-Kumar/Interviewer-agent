@@ -192,7 +192,7 @@ export default function InterviewPage() {
   // Show loading state
   if (isLoading || !livekitConfig) {
     return (
-      <div className="h-screen flex items-center justify-center bg-gradient-to-br from-[#0f172a] via-[#111827] to-[#0f172a]">
+      <div className="h-screen flex items-center justify-center bg-linear-to-br from-[#0f172a] via-[#111827] to-[#0f172a]">
         <div className="text-center">
           <div className="w-16 h-16 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
           <p className="text-slate-400">Initializing interview...</p>
