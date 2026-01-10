@@ -15,6 +15,7 @@ interface UseLiveKitOptions {
   onConnected?: () => void;
   onDisconnected?: () => void;
   onTrackSubscribed?: (track: RemoteTrack) => void;
+  onTranscriptReceived?: (transcript: { role: string; content: string; timestamp: number }) => void;
 }
 
 export function useLiveKit({
@@ -24,6 +25,7 @@ export function useLiveKit({
   onConnected,
   onDisconnected,
   onTrackSubscribed,
+  onTranscriptReceived,
 }: UseLiveKitOptions) {
   const [isConnected, setIsConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -114,6 +116,20 @@ export function useLiveKit({
       if (pub.kind === Track.Kind.Audio) {
         console.log('⏹️ [TRACK_STOPPED] AI finished speaking');
         setIsAISpeaking(false);
+      }
+    });
+
+    room.on(RoomEvent.DataReceived, (payload, participant) => {
+      try {
+        const decoder = new TextDecoder();
+        const data = JSON.parse(decoder.decode(payload));
+        
+        if (data.type === 'transcript' && data.role === 'assistant') {
+          console.log('📝 [TRANSCRIPT_RECEIVED]', data.content);
+          onTranscriptReceived?.(data);
+        }
+      } catch (e) {
+        console.error('❌ [DATA_PARSE_ERROR]', e);
       }
     });
 

@@ -24,9 +24,10 @@ db = mongo_client["interview-platform"]
 sessions_collection = db["sessions"]
 
 class InterviewAssistant(Agent):
-    def __init__(self, question: str):
+    def __init__(self, question: str, room=None):
         # Replace fullstops with commas in the question
         question = question.replace('.', ',')
+        self._room = room
         
         super().__init__(
             instructions=f"""# Role
@@ -99,10 +100,31 @@ class InterviewAssistant(Agent):
         print("DEBUG: TTS Node starting...")
         
         async def monitor_text(stream):
+            full_text = ""
             async for text in stream:
                 if text.strip():
                     print(f"🎙️ SENDING TO TTS: {text}")
+                    full_text += text
                 yield text
+            
+            # Send complete transcript to frontend when done
+            if full_text.strip():
+                print(f"🛰️ COMPLETE TRANSCRIPT: {full_text}")
+                try:
+                    # Use the room passed during initialization
+                    if self._room:
+                        transcript_data = json.dumps({
+                            "type": "transcript",
+                            "role": "assistant",
+                            "content": full_text.strip()
+                        })
+                        await self._room.local_participant.publish_data(
+                            transcript_data.encode('utf-8'),
+                            reliable=True
+                        )
+                        print("✅ Transcript sent to frontend")
+                except Exception as e:
+                    print(f"❌ Failed to send transcript: {e}")
         
         return Agent.default.tts_node(self, monitor_text(text_stream), model_settings)
 
@@ -156,7 +178,7 @@ async def entrypoint(ctx: JobContext):
     def on_agent_speech(msg: llm.ChatMessage):
         print(f"🛰️ AGENT FINAL TEXT: {msg.content}")
 
-    await session.start(room=ctx.room, agent=InterviewAssistant(question))
+    await session.start(room=ctx.room, agent=InterviewAssistant(question, ctx.room))
     # @session.on("agent_state_changed")
     # def on_state_change(ev):
     #     print(f"🧠 AI STATE: {ev.old_state} -> {ev.new_state}")

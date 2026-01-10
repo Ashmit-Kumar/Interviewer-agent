@@ -124,6 +124,17 @@ export default function InterviewPage() {
       onTrackSubscribed: (track: RemoteTrack) => {
         console.log("AI audio track subscribed");
       },
+      onTranscriptReceived: (transcript: { role: string; content: string; timestamp: number }) => {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `${Date.now()}-${Math.random()}`,
+            role: transcript.role as "user" | "assistant",
+            content: transcript.content,
+            timestamp: new Date(),
+          },
+        ]);
+      },
     };
   }, [livekitConfig?.token, livekitConfig?.wsUrl, livekitConfig?.roomName]);
 
