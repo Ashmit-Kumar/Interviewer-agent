@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import JobContext, Agent, AgentSession, AgentServer, llm, tokenize
 from livekit.plugins import silero, groq, deepgram, elevenlabs
+from groq import Groq
 
 load_dotenv()
 logging.getLogger('pymongo').setLevel(logging.WARNING)
@@ -237,96 +238,175 @@ class InterviewAssistant(Agent):
             yield chunk
 
     async def immediate_signal_and_db(self):
-        """Dedicated logic to ensure data hits the wire and DB quickly.
-        This is awaited inside the active LLM turn to avoid race conditions
-        where background tasks are cancelled or the turn completes before
-        the signal is published.
-        """
+        """Generate REAL LLM evaluation before signaling end."""
         try:
-            # 1. Persist a minimal evaluation and mark session as evaluated so frontend can fetch it immediately
+            print(f"🤖 [EVAL_START] Generating real evaluation for {self.session_id}")
+
+            # 1. BUILD CONTEXT FOR EVALUATION
+            eval_context = []
+
+            # Prefer stored chat context on assistant (if any)
+            source_ctx = getattr(self, '_chat_ctx', None) or getattr(self, 'chat_ctx', None)
+            if source_ctx and getattr(source_ctx, 'messages', None):
+                for msg in source_ctx.messages:
+                    try:
+                        if getattr(msg, 'role', None) in ['user', 'assistant'] and getattr(msg, 'content', None):
+                            role = 'Candidate' if getattr(msg, 'role') == 'user' else 'Chris'
+                            content = getattr(msg, 'content', '').strip()
+                            if content and not content.startswith('CANDIDATE CODE'):
+                                eval_context.append(f"{role}: {content}")
+                    except Exception:
+                        continue
+
+            # Add final code
             try:
-                eval_placeholder = {
-                    "strengths": ["Participated in interview"],
-                    "improvements": ["Should explain more, ask more questions"],
+                if getattr(self, 'current_code', '') and self.current_code.strip():
+                    eval_context.append(f"\n\nFINAL CODE:\n{self.current_code}")
+            except Exception:
+                pass
+
+            context_str = "\n\n".join(eval_context[-20:])
+
+            # 2. LLM EVALUATION PROMPT
+            eval_prompt = f"""# EVALUATION TASK
+Review this coding interview and generate structured feedback:
+
+CONTEXT:
+{context_str}
+
+Generate JSON evaluation with:
+{{"strengths": ["bullet 1", "bullet 2"], 
+  "improvements": ["bullet 1", "bullet 2"], 
+  "edgeCases": ["case 1", "case 2"], 
+  "nextSteps": ["action 1", "action 2"],
+  "overallScore": "A/B/C/D/F",
+  "technicalLevel": "Junior/Mid/Senior"}}
+
+Be specific about code quality, problem-solving, communication.
+Keep each bullet 1 sentence max."""
+
+            # 3. CALL GROQ SDK FOR EVALUATION (sync client run in executor)
+            try:
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: Groq(api_key=os.getenv("GROQ_API_KEY")).chat.completions.create(
+                        model="llama-3.1-8b-instant",
+                        messages=[{"role": "user", "content": eval_prompt}],
+                        temperature=0.3,
+                        max_tokens=800
+                    )
+                )
+                try:
+                    eval_raw = response.choices[0].message.content.strip()
+                except Exception:
+                    eval_raw = str(response).strip()
+                print(f"📊 [LLM_EVAL_RAW] {eval_raw[:300]}...")
+            except Exception as e:
+                print(f"❌ [GROQ_ERROR] {e}")
+                eval_raw = ""
+
+            # 4. PARSE JSON EVALUATION
+            try:
+                json_match = re.search(r'\{.*\}', eval_raw, re.DOTALL)
+                if json_match:
+                    eval_json_str = json_match.group()
+                    evaluation = json.loads(eval_json_str)
+                else:
+                    evaluation = json.loads(eval_raw)
+            except Exception as e:
+                print(f"⚠️ [EVAL_PARSE_FAIL] {e}, using fallback")
+                evaluation = {
+                    "strengths": ["Evaluation generation failed - review manually"],
+                    "improvements": [],
                     "edgeCases": [],
-                    "nextSteps": ["Follow up with candidate via email"]
+                    "nextSteps": ["Follow up with candidate"],
+                    "overallScore": "TBD",
+                    "technicalLevel": "Unknown"
                 }
 
-                # Attempt to read existing transcripts from MongoDB and sanitize them
-                schema_transcripts = []
-                try:
-                    doc = sessions_collection.find_one({'sessionId': self.session_id})
-                    if doc and isinstance(doc.get('transcripts'), list):
-                        for t in doc.get('transcripts', []):
-                            role_raw = t.get('role') if isinstance(t, dict) else None
-                            role = 'user' if role_raw == 'user' else 'assistant'
-                            content = (t.get('content') if isinstance(t, dict) else str(t)) or ''
-                            content = content.strip()
-                            if not content:
-                                continue
+            print(f"✅ [REAL_EVAL_GENERATED]")
+            print(f"   Strengths: {evaluation.get('strengths', [])}")
+            print(f"   Score: {evaluation.get('overallScore', 'N/A')}")
+            print(f"   Level: {evaluation.get('technicalLevel', 'N/A')}")
+
+            # 5. COLLECT TRANSCRIPTS FROM MONGO
+            schema_transcripts = []
+            try:
+                doc = sessions_collection.find_one({'sessionId': self.session_id})
+                if doc and isinstance(doc.get('transcripts'), list):
+                    for t in doc.get('transcripts', []):
+                        role_raw = t.get('role') if isinstance(t, dict) else None
+                        role = 'user' if role_raw == 'user' else 'assistant'
+                        content = (t.get('content') if isinstance(t, dict) else str(t)) or ''
+                        content = content.strip()
+                        if content:
                             schema_transcripts.append({
                                 'role': role,
                                 'content': content,
                                 'timestamp': t.get('timestamp') if isinstance(t, dict) and t.get('timestamp') else None
                             })
-                except Exception as e:
-                    print(f"⚠️ [TRANSCRIPTS_READ_ERR] {e}")
+            except Exception as e:
+                print(f"⚠️ [TRANSCRIPTS_READ_ERR] {e}")
 
-                backend_url = os.getenv('BACKEND_URL', 'http://localhost:5000')
-                eval_endpoint = f"{backend_url}/api/sessions/{self.session_id}/evaluation"
+            # 6. POST TO BACKEND WITH REAL EVALUATION
+            backend_url = os.getenv('BACKEND_URL', 'http://localhost:5000')
+            eval_endpoint = f"{backend_url}/api/sessions/{self.session_id}/evaluation"
 
-                payload = {
-                    'status': 'evaluated',
-                    'endedAt': datetime.datetime.utcnow().isoformat(),
-                    'finalCode': self.current_code or '',
-                    'transcripts': schema_transcripts,
-                    'evaluation': {
-                        **eval_placeholder,
-                        'generatedAt': datetime.datetime.utcnow().isoformat()
-                    }
+            payload = {
+                'status': 'evaluated',
+                'endedAt': datetime.datetime.utcnow().isoformat(),
+                'finalCode': self.current_code or '',
+                'transcripts': schema_transcripts,
+                'evaluation': {
+                    **evaluation,
+                    'generatedAt': datetime.datetime.utcnow().isoformat()
                 }
+            }
 
-                async with aiohttp.ClientSession() as session:
-                    try:
-                        print(f"📡 [HTTP] Posting evaluation to backend {eval_endpoint}")
-                        resp = await session.put(eval_endpoint, json=payload, timeout=10)
-                        text = await resp.text()
-                        if resp.status in (200, 201):
-                            print(f"✅ [HTTP] Backend accepted evaluation for {self.session_id}")
-                        else:
-                            print(f"❌ [HTTP] Backend returned {resp.status}: {text}")
-                    except Exception as e:
-                        print(f"❌ [HTTP_ERR] failed to post evaluation: {e}")
-            except Exception as e:
-                print(f"❌ [DB_UPDATE_ERR] {e}")
+            async with aiohttp.ClientSession() as session:
+                try:
+                    print(f"📡 [HTTP_POST] Sending REAL evaluation to {eval_endpoint}")
+                    resp = await session.put(eval_endpoint, json=payload, timeout=10)
+                    text = await resp.text()
+                    if resp.status in (200, 201):
+                        print(f"✅ [BACKEND_ACCEPTED] Real evaluation saved!")
+                    else:
+                        print(f"❌ [BACKEND_ERROR] {resp.status}: {text}")
+                except Exception as e:
+                    print(f"❌ [HTTP_FAIL] {e}")
 
-            # 2. Signal frontend that the interview ended (after DB write so frontend sees evaluation)
+            # 7. CONTINUE WITH SIGNAL + CLEANUP
             try:
-                print(f"📡 [SIGNAL] Sending interview_end to room for {self.session_id}...")
-                if self._room:
-                    payload = json.dumps({"type": "interview_end", "sessionId": self.session_id})
-                    try:
-                        await self._room.local_participant.publish_data(payload.encode('utf-8'), reliable=True)
-                        print("✅ [SIGNAL] Signal sent successfully")
-                    except Exception as e:
-                        print(f"❌ [SIGNAL_SEND_ERR] {e}")
-            except Exception as e:
-                print(f"❌ [SIGNAL_FATAL] {e}")
-
-            # 3. Indicate to other nodes (tts_node) that the end-signal has been sent
+                await self._send_end_signal()
+            except Exception:
+                pass
             try:
                 self._end_signal_event.set()
-                print("✅ [EVENT] end-signal event set")
-            except Exception as e:
-                print(f"❌ [EVENT_ERR] {e}")
-
-            # 4. Schedule a delayed disconnect so we don't block the LLM turn
+            except Exception:
+                pass
             try:
                 asyncio.create_task(self._delayed_disconnect())
-            except Exception as e:
-                print(f"❌ [SCHEDULE_DISCONNECT_ERR] {e}")
+            except Exception:
+                pass
+
         except Exception as e:
-            print(f"❌ [IMMEDIATE_SIGNAL_FATAL] {e}")
+            print(f"❌ [REAL_EVAL_FATAL] {e}")
+            # Fallback to old placeholder logic
+            try:
+                await self._send_end_signal()
+            except Exception:
+                pass
+
+    async def _send_end_signal(self):
+        """Extracted signal logic for reuse."""
+        try:
+            if self._room:
+                payload = json.dumps({"type": "interview_end", "sessionId": self.session_id})
+                await self._room.local_participant.publish_data(payload.encode('utf-8'), reliable=True)
+                print("✅ [SIGNAL_SENT] Frontend notified")
+        except Exception as e:
+            print(f"❌ [SIGNAL_ERR] {e}")
 
     async def _delayed_disconnect(self):
         try:
