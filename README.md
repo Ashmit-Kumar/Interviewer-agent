@@ -68,7 +68,7 @@ cd ../agent
 python -m venv .venv  # optional
 .\.venv\Scripts\activate
 pip install -r requirements.txt
-python agent.py  # or use your start script
+python agent.py  dev# or use your start script
 ```
 
 Using the included Windows batch files

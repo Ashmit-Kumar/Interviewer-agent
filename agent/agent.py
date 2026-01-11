@@ -247,9 +247,9 @@ class InterviewAssistant(Agent):
             try:
                 eval_placeholder = {
                     "strengths": ["Participated in interview"],
-                    "improvements": [],
+                    "improvements": ["Should explain more, ask more questions"],
                     "edgeCases": [],
-                    "nextSteps": []
+                    "nextSteps": ["Follow up with candidate via email"]
                 }
 
                 # Attempt to read existing transcripts from MongoDB and sanitize them

@@ -13,6 +13,7 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
+
 REM Check if Node.js is installed
 node --version >nul 2>&1
 if %errorlevel% neq 0 (
