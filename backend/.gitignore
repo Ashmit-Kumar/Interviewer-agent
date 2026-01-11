@@ -6,7 +6,7 @@ yarn-error.log*
 package-lock.json
 pnpm-lock.yaml
 .env
-.env.*
+.env.*.local
 dist/
 build/
 .DS_Store
