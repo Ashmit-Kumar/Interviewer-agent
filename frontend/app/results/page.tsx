@@ -111,14 +111,6 @@ export default function ResultsPage() {
         </section>
 
         {/* Final Code */}
-        <section className="bg-slate-900/40 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl shadow-indigo-500/10 p-6">
-          <h2 className="text-xl font-semibold text-white mb-4">
-            Final Code Submission
-          </h2>
-          <div className="bg-slate-950/50 rounded-lg p-4 font-mono text-sm text-slate-300 border border-slate-800 overflow-x-auto">
-            <pre>{results.finalCode || "No code submitted"}</pre>
-          </div>
-        </section>
 
         {/* Feedback Sections */}
         {results.evaluation && (
