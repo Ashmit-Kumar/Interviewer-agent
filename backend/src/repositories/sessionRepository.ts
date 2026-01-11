@@ -44,14 +44,16 @@ export class SessionRepository {
     }
   }
 
-  async updateEvaluation(sessionId: string, evaluation: any): Promise<ISession | null> {
+  async updateEvaluation(sessionId: string, data: any): Promise<ISession | null> {
     try {
+      // Expect the agent to provide evaluation.generatedAt; avoid conflicting updates
       return await Session.findOneAndUpdate(
         { sessionId },
-        { $set: { evaluation } },
-        { new: true }
+        { $set: data },
+        { new: true, runValidators: true }
       );
-    } catch (error) {
+    } catch (error: any) {
+      console.error('[SessionRepository] updateEvaluation error:', error);
       throw new ApiError(500, 'Failed to update evaluation');
     }
   }

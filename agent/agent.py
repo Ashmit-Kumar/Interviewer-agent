@@ -2,7 +2,9 @@ import asyncio
 import re
 import os
 import json
+import aiohttp
 import logging
+import datetime
 import pymongo
 from typing import AsyncIterable
 from dotenv import load_dotenv
@@ -241,35 +243,84 @@ class InterviewAssistant(Agent):
         the signal is published.
         """
         try:
-            print(f"📡 [SIGNAL] Sending interview_end to room for {self.session_id}...")
-            if self._room:
-                payload = json.dumps({"type": "interview_end", "sessionId": self.session_id})
-                try:
-                    await self._room.local_participant.publish_data(payload.encode('utf-8'), reliable=True)
-                    print("✅ [SIGNAL] Signal sent successfully")
-                except Exception as e:
-                    print(f"❌ [SIGNAL_SEND_ERR] {e}")
-
-            # Update DB status synchronously via executor to avoid blocking event loop
+            # 1. Persist a minimal evaluation and mark session as evaluated so frontend can fetch it immediately
             try:
-                loop = asyncio.get_event_loop()
-                def _update():
-                    return sessions_collection.update_one(
-                        {"sessionId": self.session_id},
-                        {"$set": {"status": "completed", "finalCode": self.current_code, "completedAt": True}}
-                    )
-                await loop.run_in_executor(None, _update)
-                print("✅ [DB] Session marked completed")
+                eval_placeholder = {
+                    "strengths": ["Participated in interview"],
+                    "improvements": [],
+                    "edgeCases": [],
+                    "nextSteps": []
+                }
+
+                # Attempt to read existing transcripts from MongoDB and sanitize them
+                schema_transcripts = []
+                try:
+                    doc = sessions_collection.find_one({'sessionId': self.session_id})
+                    if doc and isinstance(doc.get('transcripts'), list):
+                        for t in doc.get('transcripts', []):
+                            role_raw = t.get('role') if isinstance(t, dict) else None
+                            role = 'user' if role_raw == 'user' else 'assistant'
+                            content = (t.get('content') if isinstance(t, dict) else str(t)) or ''
+                            content = content.strip()
+                            if not content:
+                                continue
+                            schema_transcripts.append({
+                                'role': role,
+                                'content': content,
+                                'timestamp': t.get('timestamp') if isinstance(t, dict) and t.get('timestamp') else None
+                            })
+                except Exception as e:
+                    print(f"⚠️ [TRANSCRIPTS_READ_ERR] {e}")
+
+                backend_url = os.getenv('BACKEND_URL', 'http://localhost:5000')
+                eval_endpoint = f"{backend_url}/api/sessions/{self.session_id}/evaluation"
+
+                payload = {
+                    'status': 'evaluated',
+                    'endedAt': datetime.datetime.utcnow().isoformat(),
+                    'finalCode': self.current_code or '',
+                    'transcripts': schema_transcripts,
+                    'evaluation': {
+                        **eval_placeholder,
+                        'generatedAt': datetime.datetime.utcnow().isoformat()
+                    }
+                }
+
+                async with aiohttp.ClientSession() as session:
+                    try:
+                        print(f"📡 [HTTP] Posting evaluation to backend {eval_endpoint}")
+                        resp = await session.put(eval_endpoint, json=payload, timeout=10)
+                        text = await resp.text()
+                        if resp.status in (200, 201):
+                            print(f"✅ [HTTP] Backend accepted evaluation for {self.session_id}")
+                        else:
+                            print(f"❌ [HTTP] Backend returned {resp.status}: {text}")
+                    except Exception as e:
+                        print(f"❌ [HTTP_ERR] failed to post evaluation: {e}")
             except Exception as e:
                 print(f"❌ [DB_UPDATE_ERR] {e}")
-            # Indicate to other nodes (tts_node) that the end-signal has been sent
+
+            # 2. Signal frontend that the interview ended (after DB write so frontend sees evaluation)
+            try:
+                print(f"📡 [SIGNAL] Sending interview_end to room for {self.session_id}...")
+                if self._room:
+                    payload = json.dumps({"type": "interview_end", "sessionId": self.session_id})
+                    try:
+                        await self._room.local_participant.publish_data(payload.encode('utf-8'), reliable=True)
+                        print("✅ [SIGNAL] Signal sent successfully")
+                    except Exception as e:
+                        print(f"❌ [SIGNAL_SEND_ERR] {e}")
+            except Exception as e:
+                print(f"❌ [SIGNAL_FATAL] {e}")
+
+            # 3. Indicate to other nodes (tts_node) that the end-signal has been sent
             try:
                 self._end_signal_event.set()
                 print("✅ [EVENT] end-signal event set")
             except Exception as e:
                 print(f"❌ [EVENT_ERR] {e}")
 
-            # Schedule a delayed disconnect so we don't block the LLM turn
+            # 4. Schedule a delayed disconnect so we don't block the LLM turn
             try:
                 asyncio.create_task(self._delayed_disconnect())
             except Exception as e:

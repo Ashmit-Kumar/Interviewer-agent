@@ -12,6 +12,9 @@ router.put('/:sessionId/code', sessionController.updateCode);
 // End interview session
 router.post('/:sessionId/end', sessionController.endSession);
 
+// Update evaluation (used by external agents)
+router.put('/:sessionId/evaluation', sessionController.updateEvaluation);
+
 // Get interview results and evaluation
 router.get('/:sessionId/results', sessionController.getResults);
 

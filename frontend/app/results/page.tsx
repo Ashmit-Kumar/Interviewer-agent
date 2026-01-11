@@ -25,7 +25,7 @@ export default function ResultsPage() {
       try {
         const response = await sessionApi.getResults(sessionId);
         
-        if (response.data.status === "completed" && response.data.evaluation) {
+        if (response.data.status === "evaluated" && response.data.evaluation) {
           // Results are ready
           setResults(response.data);
           setIsLoading(false);

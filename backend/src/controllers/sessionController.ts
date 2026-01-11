@@ -144,6 +144,59 @@ export class SessionController {
     }
   };
 
+  updateEvaluation = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { sessionId } = req.params;
+
+      const body = req.body || {};
+
+      if (!body || Object.keys(body).length === 0) {
+        throw new ApiError(400, 'Evaluation payload is required');
+      }
+
+      // Build sanitized data object to update
+      const data: any = {};
+
+      // Accept either full payload or nested `evaluation` key
+      const incomingEval = body.evaluation || (body.strengths || body.improvements || body.edgeCases || body.nextSteps ? body : null);
+      if (incomingEval) {
+        data.evaluation = {
+          strengths: Array.isArray(incomingEval.strengths) ? incomingEval.strengths : [],
+          improvements: Array.isArray(incomingEval.improvements) ? incomingEval.improvements : [],
+          edgeCases: Array.isArray(incomingEval.edgeCases) ? incomingEval.edgeCases : [],
+          nextSteps: Array.isArray(incomingEval.nextSteps) ? incomingEval.nextSteps : []
+        };
+      }
+
+      // Sanitize transcripts if provided
+      if (Array.isArray(body.transcripts)) {
+        data.transcripts = body.transcripts
+          .map((t: any) => {
+            const content = (t.content || '').toString().trim();
+            if (!content) return null;
+            const role = (t.role === 'user') ? 'user' : 'assistant';
+            return { role, content, timestamp: t.timestamp ? new Date(t.timestamp) : undefined };
+          })
+          .filter(Boolean);
+      }
+
+      if (body.finalCode) data.finalCode = String(body.finalCode || '');
+
+      // Ensure final status is evaluated
+      data.status = 'evaluated';
+
+      const session = await sessionRepository.updateEvaluation(sessionId, data);
+
+      if (!session) {
+        throw new ApiError(404, 'Session not found');
+      }
+
+      res.json({ success: true, data: { sessionId } });
+    } catch (error) {
+      next(error);
+    }
+  };
+
   private async runEvaluation(sessionId: string): Promise<void> {
     try {
       const session = await sessionRepository.findBySessionId(sessionId);
