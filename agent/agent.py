@@ -242,30 +242,31 @@ class InterviewAssistant(Agent):
         try:
             print(f"🤖 [EVAL_START] Generating real evaluation for {self.session_id}")
 
-            # 1. BUILD CONTEXT FOR EVALUATION
+            # 1. BUILD CONTEXT FOR EVALUATION (use session.chat_ctx)
             eval_context = []
+            session = getattr(self, '_session', None)
+            print(f"🔍 [EVAL_DEBUG] Session available: {session is not None}")
 
-            # Prefer stored chat context on assistant (if any)
-            source_ctx = getattr(self, '_chat_ctx', None) or getattr(self, 'chat_ctx', None)
-            if source_ctx and getattr(source_ctx, 'messages', None):
-                for msg in source_ctx.messages:
+            if session and getattr(session, 'chat_ctx', None) and getattr(session.chat_ctx, 'messages', None):
+                for msg in session.chat_ctx.messages[-20:]:
                     try:
                         if getattr(msg, 'role', None) in ['user', 'assistant'] and getattr(msg, 'content', None):
-                            role = 'Candidate' if getattr(msg, 'role') == 'user' else 'Chris'
-                            content = getattr(msg, 'content', '').strip()
+                            content = str(getattr(msg, 'content', '')).strip()
                             if content and not content.startswith('CANDIDATE CODE'):
+                                role = 'Candidate' if getattr(msg, 'role') == 'user' else 'Interviewer'
                                 eval_context.append(f"{role}: {content}")
                     except Exception:
                         continue
 
-            # Add final code
+            # Add final code if present
             try:
-                if getattr(self, 'current_code', '') and self.current_code.strip():
-                    eval_context.append(f"\n\nFINAL CODE:\n{self.current_code}")
+                if getattr(self, 'current_code', '') and str(self.current_code).strip():
+                    eval_context.append(f"\nFINAL CODE:\n{self.current_code}")
             except Exception:
                 pass
 
-            context_str = "\n\n".join(eval_context[-20:])
+            context_str = "\n\n".join(eval_context[-15:])
+            print(f"📚 [CONTEXT] {len(eval_context)} messages → {len(context_str)} chars")
 
             # 2. LLM EVALUATION PROMPT
             eval_prompt = f"""# EVALUATION TASK
@@ -502,6 +503,7 @@ async def entrypoint(ctx: JobContext):
         question = "Tell me about yourself."
 
     assistant = InterviewAssistant(question, ctx.room, session_id=session_id)
+    # Session will be created next; attach it to the assistant after creation so it's defined
 
     session = AgentSession(
         vad=silero.VAD.load(),
@@ -513,6 +515,9 @@ async def entrypoint(ctx: JobContext):
             voice_id=os.getenv("ELEVENLABS_VOICE_ID")
         )
     )
+
+    # Keep a reference to the session on the assistant so hidden evaluation can access chat_ctx
+    assistant._session = session
 
     # --- TEXT STREAM HANDLER (Replaces data_received) ---
     
