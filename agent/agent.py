@@ -1,4 +1,5 @@
 import asyncio
+import re
 import os
 import json
 import logging
@@ -85,25 +86,33 @@ class UserTranscriptLogHandler(logging.Handler):
 logging.getLogger('livekit.agents').addHandler(UserTranscriptLogHandler())
 
 class InterviewAssistant(Agent):
-    def __init__(self, question: str, room=None):
+    def __init__(self, question: str, room=None, session_id=None):
         question = question.replace('.', ',')
         self._room = room
+        self.session_id = session_id
+        # Event used to indicate the end-interview signal has been sent
+        self._end_signal_event = asyncio.Event()
         self.current_code = ""
         super().__init__(
             instructions=f"""# Role
                 You are Chris, a professional Technical Interviewer conducting a collaborative coding interview.
+
+                # IMPORTANT: ENDING THE INTERVIEW (MANDATORY)
+                - When the candidate confirms they want to end the interview, you MUST conclude the interview.
+                - To conclude, say a brief warm one-sentence goodbye and then append the exact token [[END_INTERVIEW]] at the very end of your response.
+                - THIS IS MANDATORY: include the token exactly as shown (no extra characters), the system will use it to finish the session.
 
                 # Context
                 Problem assigned: {question}
 
                 # How to handle the Code Editor
                 - You will receive "CANDIDATE CODE UPDATE" messages in your context history.
-                - **Rule**: Whenever you see a new code block, analyze it silently. 
+                - **Rule**: Whenever you see a new code block, analyze it silently.
                 - **Rule**: Only speak if the candidate asks a question, or if they have finished a significant logic block and seem stuck.
-                - **Rule**: Do not comment on every character. 
+                - **Rule**: Do not comment on every character.
 
                 # Voice Output & Formatting
-                - **NO Full Stops**: Use commas, question marks, or exclamation marks.
+                - **NO Full Stops**: Never use FullStop(.) or periods to end the sentence.
                 - **Plain Text Only**: No markdown or backticks.
                 - **Brevity**: 1-3 sentences maximum.
                 """
@@ -125,25 +134,208 @@ class InterviewAssistant(Agent):
         async def monitor_text(stream):
             full_text = ""
             async for text in stream:
-                if text.strip():
-                    full_text += text
-                yield text
+                try:
+                    # STRIP token from any tts chunk so frontend doesn't see it
+                    if isinstance(text, str) and re.search(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", text, flags=re.IGNORECASE):
+                        # Found token in TTS chunk — clean and trigger immediate signal if not already done
+                        clean_text = re.sub(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", "", text, flags=re.IGNORECASE)
+                        print(f"DEBUG: [TTS_CHUNK_MATCH] raw='{text[:120]}' cleaned='{(clean_text or '')[:120]}'")
+                        # If the end-signal hasn't been sent yet, ensure we send it now.
+                        try:
+                            if not getattr(self, '_end_signal_event', None) or not self._end_signal_event.is_set():
+                                print(f"DEBUG: [TTS_TRIGGER] initiating immediate signal from tts_node for {self.session_id}")
+                                await self.immediate_signal_and_db()
+                        except Exception as e:
+                            print(f"❌ [TTS_TRIGGER_ERR] {e}")
+                    else:
+                        clean_text = text.replace('[[END_INTERVIEW]]', '') if isinstance(text, str) else text
+                except Exception:
+                    clean_text = text
+
+                # Debug: log potential token fragments or notable chunks
+                try:
+                    if isinstance(text, str) and ("[[" in text or "END_INTERVIEW" in text or "END INTERVIEW" in text):
+                        print(f"DEBUG: [TTS_CHUNK] raw='{text[:120]}' cleaned='{(clean_text or '')[:120]}'")
+                except Exception:
+                    pass
+
+                if isinstance(clean_text, str) and clean_text.strip():
+                    full_text += clean_text
+
+                # Yield cleaned text to the downstream TTS pipeline
+                yield clean_text
 
             if full_text.strip() and self._room:
                 try:
+                    # Debug: show outgoing assistant transcript
+                    print(f"DEBUG: [TTS_PUBLISH] assistant transcript length={len(full_text.strip())}")
                     transcript_data = json.dumps({
                         "type": "transcript",
                         "role": "assistant",
                         "content": full_text.strip()
                     })
+                    # Wait briefly for the end-signal to be sent so ordering is preserved
+                    try:
+                        await asyncio.wait_for(self._end_signal_event.wait(), timeout=2)
+                        print('DEBUG: [TTS_WAIT] end-signal observed before publish')
+                    except asyncio.TimeoutError:
+                        print('DEBUG: [TTS_WAIT] timeout while waiting for end-signal (proceeding)')
+
                     await self._room.local_participant.publish_data(
                         transcript_data.encode('utf-8'),
                         reliable=True
                     )
+                    print("✅ [TTS_PUBLISHED] assistant transcript sent to frontend")
                 except Exception as e:
                     print(f"❌ Failed to send transcript: {e}")
 
         return Agent.default.tts_node(self, monitor_text(text_stream), model_settings)
+
+    async def llm_node(self, chat_ctx: llm.ChatContext, tools, model_settings):
+        """Intercept LLM output stream and react to the end-interview token."""
+        print(f"DEBUG: [LLM_NODE] Processing new turn for session {self.session_id}")
+        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+            try:
+                # Normalize content extraction for different chunk shapes
+                content = None
+                if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
+                    delta = getattr(chunk.choices[0], 'delta', None)
+                    content = getattr(delta, 'content', None)
+                elif isinstance(chunk, str):
+                    content = chunk
+
+                # Debug: log potential token fragments
+                try:
+                    if isinstance(content, str) and ("[[" in content or "END_INTERVIEW" in content or "END INTERVIEW" in content):
+                        print(f"DEBUG: [LLM_CHUNK_INTERCEPT] Potential token fragment: '{content[:160]}'")
+                except Exception:
+                    pass
+
+                # Check for several token shapes using regex to avoid misses
+                if content and isinstance(content, str) and re.search(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", content, flags=re.IGNORECASE):
+                    print(f"🎯🎯🎯 [MATCH] FOUND END TOKEN IN STREAM")
+
+                    # 1. Strip the token so downstream TTS/transcript doesn't see it
+                    try:
+                        if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
+                            new_content = re.sub(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", "", content, flags=re.IGNORECASE)
+                            chunk.choices[0].delta.content = new_content
+                            print(f"DEBUG: [LLM_STRIP] chunk content cleaned to '{(new_content or '')[:160]}'")
+                    except Exception as e:
+                        print(f"❌ [STRIP_ERR] {e}")
+
+                    # 2. Trigger evaluation and close immediately (synchronous within this turn)
+                    try:
+                        print(f"DEBUG: [SHUTDOWN] Sending immediate signal for {self.session_id}")
+                        await self.immediate_signal_and_db()
+                    except Exception as e:
+                        print(f"❌ [IMMEDIATE_SIGNAL_ERR] {e}")
+            except Exception as e:
+                print(f"❌ [LLM_NODE_ERROR] {e}")
+            yield chunk
+
+    async def immediate_signal_and_db(self):
+        """Dedicated logic to ensure data hits the wire and DB quickly.
+        This is awaited inside the active LLM turn to avoid race conditions
+        where background tasks are cancelled or the turn completes before
+        the signal is published.
+        """
+        try:
+            print(f"📡 [SIGNAL] Sending interview_end to room for {self.session_id}...")
+            if self._room:
+                payload = json.dumps({"type": "interview_end", "sessionId": self.session_id})
+                try:
+                    await self._room.local_participant.publish_data(payload.encode('utf-8'), reliable=True)
+                    print("✅ [SIGNAL] Signal sent successfully")
+                except Exception as e:
+                    print(f"❌ [SIGNAL_SEND_ERR] {e}")
+
+            # Update DB status synchronously via executor to avoid blocking event loop
+            try:
+                loop = asyncio.get_event_loop()
+                def _update():
+                    return sessions_collection.update_one(
+                        {"sessionId": self.session_id},
+                        {"$set": {"status": "completed", "finalCode": self.current_code, "completedAt": True}}
+                    )
+                await loop.run_in_executor(None, _update)
+                print("✅ [DB] Session marked completed")
+            except Exception as e:
+                print(f"❌ [DB_UPDATE_ERR] {e}")
+            # Indicate to other nodes (tts_node) that the end-signal has been sent
+            try:
+                self._end_signal_event.set()
+                print("✅ [EVENT] end-signal event set")
+            except Exception as e:
+                print(f"❌ [EVENT_ERR] {e}")
+
+            # Schedule a delayed disconnect so we don't block the LLM turn
+            try:
+                asyncio.create_task(self._delayed_disconnect())
+            except Exception as e:
+                print(f"❌ [SCHEDULE_DISCONNECT_ERR] {e}")
+        except Exception as e:
+            print(f"❌ [IMMEDIATE_SIGNAL_FATAL] {e}")
+
+    async def _delayed_disconnect(self):
+        try:
+            await asyncio.sleep(6)
+            if self._room:
+                try:
+                    await self._room.disconnect()
+                    print("🔌 [DISCONNECT] Room disconnected after delayed wait")
+                except Exception as e:
+                    print(f"❌ [DISCONNECT_ERR] {e}")
+        except Exception as e:
+            print(f"❌ [DELAYED_DISCONNECT_FATAL] {e}")
+
+    async def perform_evaluation_and_close(self, chat_ctx: llm.ChatContext):
+        """Save final state, signal frontend, and gracefully disconnect the room."""
+        try:
+            print(f"🚀 [START_SHUTDOWN] Sequence initiated for {self.session_id}")
+
+            # 1. GENERATE EVALUATION (Simplified placeholder or LLM pass can be added)
+            print("DEBUG: [EVAL] Preparing evaluation payload (placeholder)")
+            eval_placeholder = {"strengths": ["Completed interview"], "improvements": [], "edgeCases": [], "nextSteps": []}
+
+            # 2. UPDATE DATABASE with evaluation
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, lambda: sessions_collection.update_one(
+                    {"sessionId": self.session_id},
+                    {"$set": {
+                        "status": "completed",
+                        "finalCode": self.current_code,
+                        "evaluation": eval_placeholder,
+                        "completedAt": True
+                    }}
+                ))
+                print("✅ [DB_SUCCESS] Evaluation and status saved.")
+            except Exception as e:
+                print(f"❌ [DB_ERR] {e}")
+
+            # 3. SIGNAL FRONTEND that interview ended
+            if self._room:
+                try:
+                    end_payload = json.dumps({"type": "interview_end", "sessionId": self.session_id})
+                    print(f"DEBUG: [SIGNAL_SEND] Sending payload: {end_payload}")
+                    await self._room.local_participant.publish_data(end_payload.encode('utf-8'), reliable=True)
+                    print("✅ [DATA] interview_end sent to frontend")
+                except Exception as e:
+                    print(f"❌ [DATA_SEND_ERR] {e}")
+
+            # 4. WAIT & DISCONNECT
+            print("DEBUG: [SLEEP] Waiting 5s for TTS audio to clear...")
+            await asyncio.sleep(5)
+            if self._room:
+                try:
+                    print("🔌 [DISCONNECT] Leaving room now")
+                    await self._room.disconnect()
+                    print("🔌 [ROOM] Agent disconnected successfully.")
+                except Exception as e:
+                    print(f"❌ [ROOM_DISCONNECT_ERR] {e}")
+        except Exception as e:
+            print(f"❌ [PERFORM_CLOSE_FATAL] {e}")
 
 server = AgentServer()
 
@@ -178,7 +370,7 @@ async def entrypoint(ctx: JobContext):
         print(f"⚠️ DB Error: {e}")
         question = "Tell me about yourself."
 
-    assistant = InterviewAssistant(question, ctx.room)
+    assistant = InterviewAssistant(question, ctx.room, session_id=session_id)
 
     session = AgentSession(
         vad=silero.VAD.load(),

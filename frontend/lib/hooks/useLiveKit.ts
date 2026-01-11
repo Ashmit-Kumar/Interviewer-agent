@@ -123,12 +123,45 @@ export function useLiveKit({
     room.on(RoomEvent.DataReceived, (payload, participant) => {
       // Raw logging to debug missing messages
       try {
-        console.log('📥 [RAW_DATA_RECEIVED] From:', participant?.identity);
-        const decoder = new TextDecoder();
-        const decodedString = decoder.decode(payload);
-        console.log('📄 [DECODED_DATA]:', decodedString);
+      console.log('📥 [RAW_DATA_RECEIVED] From:', participant?.identity);
+      const decoder = new TextDecoder();
+      const decodedString = decoder.decode(payload);
+      console.log('📄 [DECODED_DATA]:', decodedString);
+      console.log('🔍 [DATA_INCOMING] Raw:', decodedString);
 
         const data = JSON.parse(decodedString);
+
+        // Handle end-of-interview signal from agent
+        if (data.type === 'interview_end') {
+          console.log('🏁🏁🏁 [END_SIGNAL_RECEIVED] sessionId:', data.sessionId, data);
+          console.warn('SYSTEM ALERT: INTERVIEW ENDING BY AGENT COMMAND');
+          try {
+            window.dispatchEvent(new CustomEvent('interview-ended', { detail: { sessionId: data.sessionId } }));
+            console.log("✅ [EVENT_DISPATCHED] 'interview-ended' sent to window");
+          } catch (e) {
+            console.error('❌ [EVENT_DISPATCH_ERROR]', e);
+          }
+          // Hard redirect shortly after signal to ensure user lands on results
+          try {
+            if (typeof window !== 'undefined') {
+              const targetUrl = `/results?sessionId=${data.sessionId || roomName}`;
+              console.log('🚀 [REDIRECT] Navigating to:', targetUrl);
+              // Give a tiny delay so the user can hear last audio
+              setTimeout(() => {
+                try {
+                  if (window.location.pathname.includes('/interview')) {
+                    window.location.href = targetUrl;
+                  }
+                } catch (e) {
+                  console.error('❌ [HARD_REDIRECT_ERR]', e);
+                }
+              }, 2000);
+            }
+          } catch (e) {
+            console.error('❌ [REDIRECT_SETUP_ERR]', e);
+          }
+          return;
+        }
 
         if (data.type === 'transcript' && data.content) {
           console.log(`✨ [MATCHED_TRANSCRIPT] ${data.role}:`, data.content);

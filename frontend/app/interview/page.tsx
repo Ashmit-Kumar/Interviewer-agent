@@ -198,26 +198,42 @@ export default function InterviewPage() {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Listen for automatic end signal from agent and redirect
+  useEffect(() => {
+    const handleAutoEnd = (event: any) => {
+      const sid = event?.detail?.sessionId || sessionId;
+      console.log("🚀 Redirecting to results for session:", sid);
+      setIsEnding(true);
+      setTimeout(() => {
+        router.push(`/results?sessionId=${sid}`);
+      }, 3000); // allow final TTS to play
+    };
+
+    window.addEventListener('interview-ended', handleAutoEnd as EventListener);
+    return () => window.removeEventListener('interview-ended', handleAutoEnd as EventListener);
+  }, [router, sessionId]);
+
   const handleToggleMute = () => {
     toggleMute();
   };
 
   const handleEndCall = async () => {
     if (!sessionId) return;
-    
+    if (!confirm('Are you sure you want to end the interview?')) return;
+
     setIsEnding(true);
-    
+
     try {
       // Disconnect from LiveKit room
       disconnect();
-      
+
       // Save final code and end session
       await sessionApi.updateCode(sessionId, code);
       await sessionApi.endSession(sessionId);
-      
+
       // End LiveKit room on backend
       await sessionApi.endLiveKitRoom(sessionId);
-      
+
       // Navigate to results page
       router.push(`/results?sessionId=${sessionId}`);
     } catch (error) {
