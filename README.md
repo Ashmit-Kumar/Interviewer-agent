@@ -1,247 +1,161 @@
-# Complete Project Setup Guide
+# Interview Platform — Readme
 
-This is a monorepo containing both frontend and backend for the AI Interview Practice Platform.
+This repository is a monorepo for an AI-powered interview practice platform. It contains a Next.js frontend, an Express + TypeScript backend, and a Python LiveKit-based voice agent.
 
-## Prerequisites
+Goals
+- Run live voice interviews with an AI interviewer
+- Capture transcripts and candidate code edits
+- Generate structured evaluations after each interview
 
-Before starting, ensure you have:
-- **Node.js** (v18 or higher)
-- **MongoDB** (running locally or remote connection)
-- **Redis** (running locally)
-- **npm** or **yarn**
+Contents
+- `frontend/` — Next.js app (UI, interview experience, results)
+- `backend/` — Express API (session management, evaluation service)
+- `agent/` — Python LiveKit agent (STT, LLM, TTS, evaluation delivery)
 
----
+Prerequisites
+- Node.js v18+ (frontend & backend)
+- Python 3.10+ (agent)
+- MongoDB (local or Atlas)
+- Redis
+- npm or yarn
 
-## Quick Start
-
-### 1. Clone and Install
+Quick Setup
+1. Install dependencies
 
 ```bash
-# Install backend dependencies
+# Backend
 cd backend
 npm install
 
-# Install frontend dependencies
+# Frontend
 cd ../frontend
 npm install
+
+# Agent (Python)
+cd ../agent
+pip install -r requirements.txt
 ```
 
-### 2. Configure Environment Variables
+2. Configure environment variables
 
-#### Backend (.env)
-```bash
+- Backend: copy `.env.example` to `.env` and set:
+   - `MONGODB_URI` (required)
+   - `REDIS_HOST`, `REDIS_PORT` (if using Redis)
+   - `GROQ_API_KEY` (LLM)
+   - `VAPI_PRIVATE_KEY`, `VAPI_PUBLIC_KEY`, `VAPI_AGENT_ID` (optional)
+
+- Frontend: copy `.env.local.example` to `.env.local` and set:
+   - `NEXT_PUBLIC_API_URL` (default `http://localhost:5000/api`)
+
+- Agent: set `MONGODB_URI` and optionally `BACKEND_URL` (default `http://localhost:5000`)
+
+3. Start services
+
+Start MongoDB and Redis as needed, then run backend and frontend in separate terminals:
+
+```powershell
+# Backend
 cd backend
-cp .env.example .env
-# Edit .env with your actual keys
+npm run seed   # seeds sample questions
+npm run dev
+
+# Frontend
+cd ../frontend
+npm run dev
+
+# Agent (in a new terminal)
+cd ../agent
+python -m venv .venv  # optional
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+python agent.py  # or use your start script
 ```
 
-Required keys:
-- `MONGODB_URI` - MongoDB connection string
-- `REDIS_HOST`, `REDIS_PORT` - Redis configuration
-- `GROQ_API_KEY` - Get from https://console.groq.com
-- `VAPI_PRIVATE_KEY`, `VAPI_PUBLIC_KEY`, `VAPI_AGENT_ID` - Get from https://vapi.ai
+Using the included Windows batch files
+------------------------------------
 
-#### Frontend (.env.local)
+This repository includes three helper batch files at the repo root for Windows users:
+
+- `install.bat` — installs dependencies and creates the Python virtual environment for the agent.
+- `start.bat` — launches the Python agent, backend, and frontend in separate command windows.
+- `stop.bat` — kills Node and Python processes started by `start.bat`.
+
+Run them from PowerShell in the repository root (`D:\java_prog\Projects\Interview_platform`):
+
+```powershell
+# Install dependencies and create the agent venv
+.\install.bat
+
+# Start services (each service opens in its own window)
+.\start.bat
+
+# Stop services
+.\stop.bat
+```
+
+Notes
+- If you see permission errors, run PowerShell as Administrator. Most users don't need admin rights.
+- `install.bat` will create `agent\venv` and install Python packages into it; if you already have a venv, it will reuse it.
+- `start.bat` uses `start` to open new terminals — close those terminal windows to stop the individual service, or use `stop.bat` to stop all services.
+- If the agent doesn't start, activate the venv manually and run the agent for debugging:
+
+```powershell
+cd agent
+.\venv\Scripts\activate
+python agent.py
+```
+
+
+URLs
+- Frontend: http://localhost:3000
+- Backend API: http://localhost:5000
+- Backend health: http://localhost:5000/health
+
+Key Endpoints
+- POST `/api/sessions/start` — create a session
+- PUT `/api/sessions/:sessionId/code` — update candidate code snapshot
+- POST `/api/sessions/:sessionId/end` — mark session ended (backend orchestrator)
+- PUT `/api/sessions/:sessionId/evaluation` — agent POSTs evaluation (schema-compliant)
+- GET `/api/sessions/:sessionId/results` — fetch results/evaluation
+
+Agent & Evaluation Flow (High-level)
+1. Frontend requests a new session and creates a LiveKit room.
+2. The Python agent joins the room, processes audio (STT), uses an LLM to respond, and TTS to speak.
+3. When interview ends (token [[END_INTERVIEW]] or user action), agent generates a structured evaluation and sends it to backend via `/api/sessions/:sessionId/evaluation`.
+4. Backend persists evaluation and sets session `status` to `evaluated`.
+5. Frontend polls `/results` and shows the evaluation once available.
+
+Schema Notes
+- `Session.transcripts.role` must be `user` or `assistant` (case-sensitive). Agent and backend sanitize roles before saving.
+- `evaluation` is an object with arrays: `strengths`, `improvements`, `edgeCases`, `nextSteps`, and `generatedAt` (ISO datetime string).
+
+Troubleshooting
+- 500 when saving evaluation: ensure agent payload is schema-compliant (no extra types in `transcripts.role`) and includes `evaluation.generatedAt` to avoid conflicting update operators.
+- MongoDB connection: verify `MONGODB_URI` and that MongoDB is running.
+- CORS issues: set `FRONTEND_URL` in backend `.env` or configure CORS accordingly.
+
+Testing the evaluation endpoint with curl
+
 ```bash
-cd frontend
-cp .env.local.example .env.local
+curl -X PUT http://localhost:5000/api/sessions/<sessionId>/evaluation \
+   -H "Content-Type: application/json" \
+   -d '{
+      "status":"evaluated",
+      "finalCode":"",
+      "evaluation": {"strengths":["Good"], "improvements":[], "edgeCases":[], "nextSteps":[], "generatedAt":"2026-01-11T00:00:00Z"},
+      "transcripts": [{"role":"user","content":"Hi"}]
+   }'
 ```
 
-Set:
-- `NEXT_PUBLIC_API_URL=http://localhost:5000/api`
+Development Tips
+- Use the browser devtools Network tab to inspect API calls.
+- Check backend logs for Mongoose validation errors to see which field fails.
 
-### 3. Start Services
+Contributing
+- Fork, create a feature branch, run tests, and open a PR.
 
-**Terminal 1 - MongoDB (if local):**
-```bash
-mongod
-```
+License
+- MIT
 
-**Terminal 2 - Redis:**
-```bash
-redis-server
-```
-
-**Terminal 3 - Backend:**
-```bash
-cd backend
-npm run seed  # Seed database with questions
-npm run dev   # Start backend server
-```
-
-**Terminal 4 - Frontend:**
-```bash
-cd frontend
-npm run dev   # Start Next.js dev server
-```
-
-### 4. Access Application
-
-- **Frontend**: http://localhost:3000
-- **Backend API**: http://localhost:5000
-- **Health Check**: http://localhost:5000/health
-
----
-
-## Project Structure
-
-```
-Interview_platform/
-├── frontend/                 # Next.js frontend
-│   ├── app/                  # Pages (landing, interview, results)
-│   ├── components/           # React components
-│   ├── lib/                  # API clients and utilities
-│   └── package.json
-│
-├── backend/                  # Express backend
-│   ├── src/
-│   │   ├── config/          # Database & service configs
-│   │   ├── controllers/     # API controllers
-│   │   ├── models/          # MongoDB schemas
-│   │   ├── repositories/    # Data access layer
-│   │   ├── routes/          # API routes
-│   │   ├── services/        # Business logic
-│   │   │   ├── evaluation/  # Groq LLM evaluation
-│   │   │   └── interview-orchestrator/  # Interview state machine
-│   │   └── server.ts        # Entry point
-│   └── package.json
-│
-└── README.md                 # This file
-```
-
----
-
-## Key Features
-
-### Frontend
-✅ Dark themed UI with glassmorphism effects
-✅ Monaco code editor for live coding
-✅ Real-time AI transcription display
-✅ Voice agent controls (mute/unmute, end call)
-✅ Results page with structured feedback
-
-### Backend
-✅ RESTful API with Express + TypeScript
-✅ MongoDB for persistent storage
-✅ Redis for temporary interview state
-✅ Vapi integration for voice AI
-✅ Groq LLM for evaluation
-✅ Interview orchestration engine
-
----
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/sessions/start` | Start new interview |
-| PUT | `/api/sessions/:id/code` | Update code snapshot |
-| POST | `/api/sessions/:id/end` | End interview |
-| GET | `/api/sessions/:id/results` | Get evaluation results |
-| POST | `/api/vapi/webhook` | Vapi event webhook |
-
----
-
-## Getting API Keys
-
-### Groq (LLM Evaluation)
-1. Visit https://console.groq.com
-2. Sign up/login
-3. Navigate to API Keys
-4. Create new key
-5. Add to backend `.env` as `GROQ_API_KEY`
-
-### Vapi (Voice AI)
-1. Visit https://vapi.ai
-2. Create account
-3. Create a new agent in dashboard
-4. Configure agent with:
-   - System prompt for interviewer behavior
-   - Enable tools/functions
-   - Set webhook URL to your backend
-5. Copy keys to backend `.env`:
-   - `VAPI_PRIVATE_KEY`
-   - `VAPI_PUBLIC_KEY`
-   - `VAPI_AGENT_ID`
-
-### MongoDB
-- **Local**: `mongodb://localhost:27017/interview-platform`
-- **Atlas**: Get connection string from https://cloud.mongodb.com
-
-### Redis
-- **Local**: Default `localhost:6379`
-- **Cloud**: Use Redis Cloud or similar
-
----
-
-## Development Workflow
-
-1. **Start Services**: MongoDB, Redis, Backend, Frontend
-2. **Make Changes**: Edit code in respective directories
-3. **Test Locally**: Open http://localhost:3000
-4. **Debug**: Check terminal logs for errors
-
-### Hot Reload
-- **Frontend**: Auto-reloads on save
-- **Backend**: Uses nodemon for auto-restart
-
----
-
-## Troubleshooting
-
-### "Cannot connect to MongoDB"
-- Ensure MongoDB is running: `mongod`
-- Check `MONGODB_URI` in backend `.env`
-
-### "Redis connection failed"
-- Ensure Redis is running: `redis-server`
-- Check `REDIS_HOST` and `REDIS_PORT`
-
-### "CORS errors"
-- Verify `FRONTEND_URL` in backend `.env` matches frontend URL
-- Check backend CORS configuration
-
-### "Vapi not responding"
-- Verify API keys are correct
-- Check webhook URL is accessible
-- Review Vapi dashboard logs
-
----
-
-## Production Deployment
-
-### Backend
-1. Build: `npm run build`
-2. Start: `npm start`
-3. Deploy to cloud provider (Heroku, Railway, etc.)
-4. Set environment variables in hosting platform
-
-### Frontend
-1. Build: `npm run build`
-2. Deploy to Vercel/Netlify
-3. Set `NEXT_PUBLIC_API_URL` to production backend URL
-
----
-
-## Next Steps
-
-After setup, you can:
-1. **Test the flow**: Start interview → Code → End → View results
-2. **Add more questions**: Edit `backend/src/utils/seedQuestions.ts`
-3. **Customize agent**: Update Vapi agent configuration
-4. **Enhance UI**: Modify frontend components
-
----
-
-## Support
-
-For issues or questions:
-- Check backend logs: `npm run dev` in backend folder
-- Check browser console for frontend errors
-- Review API responses in Network tab
-
----
-
-## License
-
-MIT
+Contact
+- For questions, open an issue in this repo or message the maintainer.
