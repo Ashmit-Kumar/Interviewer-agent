@@ -551,7 +551,9 @@ async def entrypoint(ctx: JobContext):
             if code_content:
                 # 1. Update the brain context
                 assistant.update_code_context(code_content, session.chat_ctx)
-                
+                print(f"📝 [CODE_UPDATE] Code received from {participant_identity}, length={len(code_content)}")
+                print(f"-----\n{code_content}\n-----")
+                print(f"📥 [CODE_SYNC] Code context updated in LLM history")
                 # 2. Trigger the LLM to generate a reply (mimics speech committed)
                 asyncio.create_task(session.generate_reply())
                 
