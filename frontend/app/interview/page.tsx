@@ -408,15 +408,27 @@ export default function InterviewPage() {
                 <button 
                   onClick={handleToggleMute}
                   disabled={!isConnected}
-                  className={`flex items-center gap-2 px-4 py-1.5 text-xs transition-colors disabled:opacity-50 ${
-                    isMuted ? 'text-red-400 hover:text-red-300' : 'text-slate-400 hover:text-white'
-                  }`}
+                  className={`
+                    flex items-center gap-2 px-4 py-1.5 text-xs font-medium rounded-lg transition-all shadow-lg
+                    ${isMuted 
+                      ? 'bg-red-500 hover:bg-red-600 text-white shadow-red-500/30 border border-red-400/30' 
+                      : 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-500/30 border border-emerald-400/30'
+                    }
+                    disabled:opacity-50 disabled:cursor-not-allowed
+                  `}
+                  title={isMuted ? "Unmute microphone (allow sound)" : "Mute microphone (block sound)"}
                 >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.536 8.464a5 5 0 010 7.072m2.828-9.9a9 9 0 010 12.728M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" />
-                  </svg>
-                  {isMuted ? 'Unmute' : 'Mute'}
+                  {isMuted ? (
+                    <>
+                      🔇 <span>Unmute Mic</span>
+                    </>
+                  ) : (
+                    <>
+                      🎤 <span>Mute Mic</span>
+                    </>
+                  )}
                 </button>
+
                 <button 
                   onClick={handleEndCall}
                   disabled={!isConnected}
