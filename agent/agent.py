@@ -14,6 +14,8 @@ from livekit.agents import JobContext, Agent, AgentSession, AgentServer, llm, to
 from livekit.plugins import silero, groq, deepgram, elevenlabs
 from groq import Groq
 from database import db as local_db
+from livekit.agents.llm import ChatContext, ChatMessage, ChatRole
+
 load_dotenv()
 logging.getLogger('pymongo').setLevel(logging.WARNING)
 logging.getLogger('livekit').setLevel(logging.INFO)
@@ -152,32 +154,95 @@ class InterviewAssistant(Agent):
     #     if hasattr(chat_ctx, '_messages'):
     #         print(f"Found _messages! Count: {len(chat_ctx._messages)}")
     #     print("--- CHAT CONTEXT DEBUG END ---")
+    
+    
+    
+    
+    
+    
+    
     def update_code_context(self, code: str, chat_ctx: llm.ChatContext):
-        """Injects code by bypassing factory methods and using private attributes."""
+        """Injects code as a USER turn so the LLM 'hears' the update."""
         self.current_code = code
         
-        # 1. Manually construct the message object
-        # Using a dictionary is the safest way to avoid the Union/Instantiate error
         try:
-            # content_list = [llm.ChatContent(text=f"CANDIDATE CODE UPDATE:\n{code}")]
+            content_part = llm.ChatContext(text=f"CANDIDATE CODE UPDATE:\n{code}")
+            # 1. Create the message using the list format required by Pydantic v2
             new_msg = llm.ChatMessage(
-                role="user", 
-                content=f"CANDIDATE CODE UPDATE:\n{code}"
-                # content=content_list
+                role=llm.ChatRole.USER,
+                # content=[llm.TextContent(text=f"CANDIDATE CODE UPDATE:\n{code}")]
+                content=[content_part]
             )
-            
-            # 2. Access the hidden messages list
-            # We use getattr to find _messages (which appeared in your dir() logs)
-            msgs_list = getattr(chat_ctx, '_messages', getattr(chat_ctx, 'messages', None))
-            
-            if msgs_list is not None:
-                msgs_list.append(new_msg)
-                print(f"📥 [CONTEXT_SYNC] Code appended manually to _messages")
+
+            # 2. Append to the context safely
+            # Most LiveKit ChatContext objects expose a 'messages' list attribute
+            if hasattr(chat_ctx, 'messages'):
+                chat_ctx.messages.append(new_msg)
+                print(f"📥 [CONTEXT_SYNC] Code appended successfully to chat_ctx.messages")
             else:
-                print(f"❌ [CONTEXT_ERROR] Attribute not found. dir: {dir(chat_ctx)}")
-                
+                # Fallback for internal variations
+                msgs_list = getattr(chat_ctx, '_messages', None)
+                if msgs_list is not None:
+                    msgs_list.append(new_msg)
+                    print(f"📥 [CONTEXT_SYNC] Code appended to private _messages")
+                    
         except Exception as e:
-            print(f"❌ [CONTEXT_FATAL] Manual append failed: {e}")
+            print(f"❌ [CONTEXT_FATAL] Failed to update code context: {e}")
+        
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    # def update_code_context(self, code: str, chat_ctx: llm.ChatContext):
+    #     """Injects code by bypassing factory methods and using private attributes."""
+    #     self.current_code = code
+        
+    #     # 1. Manually construct the message object
+    #     # Using a dictionary is the safest way to avoid the Union/Instantiate error
+    #     try:
+    #         # content_list = [llm.ChatContent(text=f"CANDIDATE CODE UPDATE:\n{code}")]
+    #         new_msg = llm.ChatMessage(
+    #             # Pydantic v2: content must be a list[ChatContent]
+    #             content=[llm.TextContent(text=f"CANDIDATE CODE UPDATE:\n{code}")],
+    #             role=llm.ChatRole.USER,
+    #         )
+    #         print(f"DEBUG: Created new_msg of type {type(new_msg)} with content type {type(new_msg.content)}")
+    #         # 2. Access the hidden messages list
+    #         # We use getattr to find _messages (which appeared in your dir() logs)
+    #         msgs_list = getattr(chat_ctx, '_messages', getattr(chat_ctx, 'messages', None))
+            
+    #         if msgs_list is not None:
+    #             msgs_list.append(new_msg)
+    #             print(f"📥 [CONTEXT_SYNC] Code appended manually to _messages")
+    #         else:
+    #             print(f"❌ [CONTEXT_ERROR] Attribute not found. dir: {dir(chat_ctx)}")
+                
+    #     except Exception as e:
+    #         print(f"❌ [CONTEXT_FATAL] Manual append failed: {e}")
+
+
+
+
+
+
+
+
+
+
+
 
     # def update_code_context(self, code: str, chat_ctx: llm.ChatContext):
     #     """Injects code as a USER turn so the LLM 'hears' the update."""
@@ -550,26 +615,41 @@ class InterviewAssistant(Agent):
 
                 if ctx_obj and hasattr(ctx_obj, 'messages'):
                     # Grab more history (25 turns) for a better evaluation
+                    # for msg in ctx_obj.messages[-25:]:
+                    #     try:
+                    #         # --- FIX FOR Union/List Content Error ---
+                    #         content_raw = msg.content
+                    #         if isinstance(content_raw, list):
+                    #             # Extract text from the list of ChatContent objects
+                    #             text_content = " ".join([part.text for part in content_raw if hasattr(part, 'text')])
+                    #         else:
+                    #             text_content = str(content_raw)
+
+                    #         text_content = text_content.strip()
+                            
+                    #         # Only add actual conversation, skip the raw code update blocks for the transcript
+                    #         if text_content and not text_content.startswith('CANDIDATE CODE UPDATE'):
+                    #             role = 'Candidate' if msg.role == 'user' else 'Interviewer'
+                    #             eval_context.append(f"{role}: {text_content}")
+                    #     except Exception as e:
+                    #         print(f"⚠️ [EVAL_MSG_SKIP] {e}")
+                    #         continue
                     for msg in ctx_obj.messages[-25:]:
                         try:
-                            # --- FIX FOR Union/List Content Error ---
-                            content_raw = msg.content
-                            if isinstance(content_raw, list):
-                                # Extract text from the list of ChatContent objects
-                                text_content = " ".join([part.text for part in content_raw if hasattr(part, 'text')])
+                            # Extract text safely regardless of whether it's a string or list
+                            if isinstance(msg.content, list):
+                                text_content = " ".join([part.text for part in msg.content if hasattr(part, 'text')])
                             else:
-                                text_content = str(content_raw)
+                                text_content = str(msg.content)
 
                             text_content = text_content.strip()
                             
-                            # Only add actual conversation, skip the raw code update blocks for the transcript
+                            # Skip internal markers
                             if text_content and not text_content.startswith('CANDIDATE CODE UPDATE'):
-                                role = 'Candidate' if msg.role == 'user' else 'Interviewer'
+                                role = 'Candidate' if msg.role == llm.ChatRole.USER else 'Interviewer'
                                 eval_context.append(f"{role}: {text_content}")
                         except Exception as e:
-                            print(f"⚠️ [EVAL_MSG_SKIP] {e}")
                             continue
-
                 # Add final code block to the context so LLM can grade the actual code
                 if self.current_code:
                     eval_context.append(f"\nFINAL SOURCE CODE:\n{self.current_code}")
@@ -912,17 +992,23 @@ async def entrypoint(ctx: JobContext):
         try:
             # Wait for the complete code text from the stream
             code_content = await reader.read_all()
+            print(f"DEBUG: Received code content of type {type(code_content)}")
             if code_content:
             # SAFETY CHECK: Access the private _chat_ctx found in your logs
                 # ctx_obj = getattr(session, '_chat_ctx', None)
                 ctx_obj = getattr(session, '_chat_ctx', getattr(session, 'chat_ctx', None))
+                print(f"DEBUG: Retrieved chat_ctx: {ctx_obj is not None}")
+                print(f"DEBUG: chat_ctx type: {type(ctx_obj)}")
                 if ctx_obj:
                     assistant.update_code_context(code_content, ctx_obj)
-                    if not session.is_speaking():
+                        # Avoid using removed `is_speaking` API. Prefer agent state tracking.
+                    agent_state = getattr(assistant, '_agent_state', None)
+                    if agent_state != 'speaking':
                         print("🤖 [REPLY] Triggering AI thought process...")
-                        # In your version, calling this without 'await' inside the task
-                        # is the correct way to handle the SpeechHandle object
+                        # call generate_reply non-blocking as before
                         session.generate_reply()
+                    else:
+                        print("🔇 [SKIP_REPLY] Agent currently speaking; skipping generate_reply")
                 if ctx_obj is None:
                     print("❌ [CRITICAL] Could not find _chat_ctx on session object")
                     return
@@ -962,6 +1048,11 @@ async def entrypoint(ctx: JobContext):
                 state_payload.encode('utf-8'),
                 reliable=True
             ))
+            # Keep a local copy of the agent state on the assistant for sync checks
+            try:
+                assistant._agent_state = str(ev.new_state).split('.')[-1].lower()
+            except Exception:
+                pass
         except Exception as e:
             print(f"❌ [STATE_BROADCAST_ERROR] {e}")
         print(f"🧠 AI STATE: {ev.old_state} -> {ev.new_state}")
