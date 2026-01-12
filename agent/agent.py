@@ -96,6 +96,7 @@ class InterviewAssistant(Agent):
         # Event used to indicate the end-interview signal has been sent
         self._end_signal_event = asyncio.Event()
         self.current_code = ""
+        print(f"🎯 [ASSISTANT_INIT] InterviewAssistant created for session {self.session_id} with question: {question.title}")
         super().__init__(
             instructions=f"""# Role
                 You are Chris, a professional Technical Interviewer. You are conducting a structured coding interview.
@@ -526,6 +527,19 @@ async def entrypoint(ctx: JobContext):
     # Keep a reference to the session on the assistant so hidden evaluation can access chat_ctx
     assistant._session = session
 
+    # --- DATA CHANNEL LISTENER: Listen for 'request_end' packets from frontend ---
+    @ctx.room.on("data_received")
+    def on_data_received(packet: rtc.DataPacket):
+        try:
+            payload = json.loads(packet.data.decode('utf-8'))
+            if payload.get("type") == "request_end":
+                print(f"🛑 [SIGNAL] User clicked End Interview button for {session_id}")
+                # Use the SAME logic used for the voice END token
+                # We wrap it in a task so it doesn't block the data thread
+                asyncio.create_task(assistant.immediate_signal_and_db())
+        except Exception as e:
+            print(f"❌ [DATA_PARSE_ERR] {e}")
+
     # --- TEXT STREAM HANDLER (Replaces data_received) ---
     
     async def handle_code_stream(reader: rtc.TextStreamReader, participant_identity: str):
@@ -689,7 +703,7 @@ async def entrypoint(ctx: JobContext):
     
     # Initial Greeting
     await session.generate_reply(
-        instructions="Introduce yourself as Chris and ask if the candidate is ready to start discussing the problem: {question}. Follow Step 1 of your interview flow.'"
+        instructions="Introduce yourself as Chris and ask if the candidate is ready to start discussing the problem. Follow Step 1 of your interview flow.'"
     )
 
     while True:

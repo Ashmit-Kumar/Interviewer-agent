@@ -219,27 +219,41 @@ export default function InterviewPage() {
 
   const handleEndCall = async () => {
     if (!sessionId) return;
-    if (!confirm('Are you sure you want to end the interview?')) return;
+    // Use the standard browser confirm
+    if (!confirm('Are you sure you want to end the interview? Chris will generate your feedback now.')) return;
 
+    // 1. Show the "Ending Interview" loading overlay immediately
     setIsEnding(true);
 
-    try {
-      // Disconnect from LiveKit room
-      disconnect();
+    // 2. Send the "request_end" signal to the Agent via LiveKit Data Channel
+    if (isConnected && livekitHookResult.room) {
+      try {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(JSON.stringify({ 
+          type: "request_end" 
+        }));
 
-      // Save final code and end session
-      await sessionApi.updateCode(sessionId, code);
-      await sessionApi.endSession(sessionId);
+        await livekitHookResult.room.localParticipant.publishData(data, {
+          reliable: true // Ensures the agent definitely receives it
+        });
 
-      // End LiveKit room on backend
-      await sessionApi.endLiveKitRoom(sessionId);
+        console.log("📡 [SIGNAL] Manual end request sent to Chris.");
 
-      // Navigate to results page
+        /**
+         * IMPORTANT: 
+         * We do NOT call router.push here. 
+         * We wait for the Agent to finish the evaluation. 
+         * When the agent is done, it sends 'interview_end', which is handled 
+         * by the 'handleAutoEnd' useEffect listener you already have.
+         */
+      } catch (error) {
+        console.error("❌ Failed to send end signal to agent:", error);
+        setIsEnding(false);
+        alert("Voice system error. Please try again or refresh.");
+      }
+    } else {
+      // Fallback if room disconnected unexpectedly
       router.push(`/results?sessionId=${sessionId}`);
-    } catch (error) {
-      console.error("Failed to end session:", error);
-      setError("Failed to end session");
-      setIsEnding(false);
     }
   };
 
