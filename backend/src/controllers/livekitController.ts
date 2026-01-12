@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { RoomServiceClient, AccessToken } from 'livekit-server-sdk';
 import { livekitConfig } from '../config/services';
+import { sessionRepository } from '../repositories/sessionRepository';
 
 export class LiveKitController {
   private roomService: RoomServiceClient;
@@ -23,16 +24,27 @@ export class LiveKitController {
 
       const roomName = `interview-${sessionId}`;
 
+      // Fetch session to include questionId in room metadata if available
+      let metaObj: any = { sessionId };
+      try {
+        const session = await sessionRepository.findBySessionId(sessionId);
+        if (session) {
+          metaObj.questionId = session.questionId || session.metadata?.questionId;
+        }
+      } catch (e) {
+        console.warn('Could not load session to enrich room metadata', e);
+      }
+
       // Create room via RoomService with metadata for Python agent
       await this.roomService.createRoom({
         name: roomName,
         emptyTimeout: 3600, // 1 hour
         maxParticipants: 2,
-        metadata: JSON.stringify({ sessionId }), // Add metadata here for agent
+        metadata: JSON.stringify(metaObj), // Add metadata here for agent
       });
 
       console.log(`✓ LiveKit room created: ${roomName}`);
-      console.log(`  Room metadata: { sessionId: "${sessionId}" }`);
+      console.log(`  Room metadata: ${JSON.stringify(metaObj)}`);
 
       // Generate candidate token (no metadata needed here)
       const candidateToken = await this.generateToken(roomName, 'candidate');

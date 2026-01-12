@@ -1,4 +1,5 @@
 import asyncio
+import code
 import re
 import os
 import json
@@ -12,14 +13,14 @@ from livekit import rtc
 from livekit.agents import JobContext, Agent, AgentSession, AgentServer, llm, tokenize
 from livekit.plugins import silero, groq, deepgram, elevenlabs
 from groq import Groq
-
+from database import db as local_db
 load_dotenv()
 logging.getLogger('pymongo').setLevel(logging.WARNING)
 logging.getLogger('livekit').setLevel(logging.INFO)
-mongo_client = pymongo.MongoClient(os.getenv("MONGODB_URI"))
-db = mongo_client["interview-platform"]
-sessions_collection = db["sessions"]    
-
+# mongo_client = pymongo.MongoClient(os.getenv("MONGODB_URI"))
+# db = mongo_client["interview-platform"]
+# sessions_collection = db["sessions"]    
+# CURRENT_ROOM = None
 # Global reference to the current LiveKit room for log-based forwarding
 CURRENT_ROOM = None
 
@@ -89,24 +90,36 @@ class UserTranscriptLogHandler(logging.Handler):
 logging.getLogger('livekit.agents').addHandler(UserTranscriptLogHandler())
 
 class InterviewAssistant(Agent):
-    def __init__(self, question: str, room=None, session_id=None):
-        question = question.replace('.', ',')
+    def __init__(self, question_obj, room=None, session_id=None):
         self._room = room
         self.session_id = session_id
-        # Event used to indicate the end-interview signal has been sent
         self._end_signal_event = asyncio.Event()
         self.current_code = ""
-        print(f"🎯 [ASSISTANT_INIT] InterviewAssistant created for session {self.session_id} with question: {question.title}")
+
+        # Extract details from the object fetched from local_db
+        if isinstance(question_obj, dict):
+            title = question_obj.get('title', 'Problem')
+            desc = question_obj.get('description', 'No description provided.')
+            inp = question_obj.get('exampleInput', 'N/A')
+            out = question_obj.get('exampleOutput', 'N/A')
+        else:
+            title = str(question_obj)
+            desc = inp = out = ""
         super().__init__(
             instructions=f"""# Role
                 You are Chris, a professional Technical Interviewer. You are conducting a structured coding interview.
+                
+                # The Problem to Discuss
+                Title: {title}
+                Description: {desc}
+                Example Input: {inp}
+                Example Output: {out}
 
                 # Interview Flow (Follow Strictly)
-                1. **Introduction**: Introduce yourself as Chris. State the name of the problem you will be discussing. Ask the candidate if they are ready to begin. Wait for their acknowledgement before moving to step 2.
-                2. **Problem Explanation**: Explain the problem "{question}" in detail. Provide a clear example with input and expected output. Ask if the candidate understands.
-                3. **Brute Force Discussion**: Ask the candidate to describe a brute force approach first. Discuss their logic, time complexity, and space complexity. Ask "What can be done better?" to nudge them.
-                4. **Optimal Solution**: Once brute force is clear, discuss the optimal approach. Ask why this method is better and discuss the new complexities.
-                5. **Coding Phase**: Only after the logic is fully discussed, invite the candidate to start coding in the editor.
+                1. **Problem Explanation**: Explain the problem "{desc}" in detail. Provide a clear example with input and expected output. Ask if the candidate understands.
+                2. **Brute Force Discussion**: Ask the candidate to describe a brute force approach first. Discuss their logic, time complexity, and space complexity. Ask "What can be done better?" to nudge them.
+                3. **Optimal Solution**: Once brute force is clear, discuss the optimal approach. Ask why this method is better and discuss the new complexities.
+                4. **Coding Phase**: Only after the logic is fully discussed, invite the candidate to start coding in the editor.
 
                 # IMPORTANT: ENDING THE INTERVIEW (MANDATORY)
                 - When the candidate confirms they want to end the interview, you MUST conclude the interview.
@@ -114,13 +127,16 @@ class InterviewAssistant(Agent):
                 - THIS IS MANDATORY: include the token exactly as shown (no extra characters).
 
                 # Context
-                Problem assigned: {question}
+                Problem assigned: {title}
 
                 # How to handle the Code Editor
                 - You will receive "CANDIDATE CODE UPDATE" messages in your context history.
                 - **Rule**: Whenever you see a new code block, analyze it silently.
                 - **Rule**: Only speak if the candidate asks a question, or if they have finished a significant logic block and seem stuck.
                 - **Rule**: Do not comment on every character.
+                - **Rule**: Whenever you receive a "CANDIDATE CODE UPDATE", do NOT speak immediately unless the candidate explicitly asks "What do you think?" or "Is this correct?".
+                - **Rule**: Silently absorb the code into your logic for the next turn of the conversation.
+                - **Rule**: Do not tell the candidate the answer by yourself unless they explicitly ask for help.
 
                 # Voice Output & Formatting
                 - **NO Full Stops**: Never use periods (.) to end sentences. Use commas or line breaks.
@@ -128,284 +144,520 @@ class InterviewAssistant(Agent):
                 - **Brevity**: 1-3 sentences maximum per turn to keep it conversational.
                 """
         )
-
+    # def log_context_attributes(self, chat_ctx):
+    #     print("--- CHAT CONTEXT DEBUG START ---")
+    #     print(f"Object Type: {type(chat_ctx)}")
+    #     print(f"All Attributes: {dir(chat_ctx)}")
+    #     # Try to see if it has a common private name like _messages
+    #     if hasattr(chat_ctx, '_messages'):
+    #         print(f"Found _messages! Count: {len(chat_ctx._messages)}")
+    #     print("--- CHAT CONTEXT DEBUG END ---")
     def update_code_context(self, code: str, chat_ctx: llm.ChatContext):
-        """Injects code as a USER turn so the LLM 'hears' the update."""
+        """Injects code by bypassing factory methods and using private attributes."""
         self.current_code = code
         
-        # We add this as a USER role so the LLM treats it as an active event in the conversation
-        code_message = llm.ChatMessage(
-            role="user", 
-            content=f"CANDIDATE CODE UPDATE:\n{code}"
-        )
-        chat_ctx.messages.append(code_message)
-        print(f"📥 [CONTEXT_SYNC] Code appended to timeline")
+        # 1. Manually construct the message object
+        # Using a dictionary is the safest way to avoid the Union/Instantiate error
+        try:
+            # content_list = [llm.ChatContent(text=f"CANDIDATE CODE UPDATE:\n{code}")]
+            new_msg = llm.ChatMessage(
+                role="user", 
+                content=f"CANDIDATE CODE UPDATE:\n{code}"
+                # content=content_list
+            )
+            
+            # 2. Access the hidden messages list
+            # We use getattr to find _messages (which appeared in your dir() logs)
+            msgs_list = getattr(chat_ctx, '_messages', getattr(chat_ctx, 'messages', None))
+            
+            if msgs_list is not None:
+                msgs_list.append(new_msg)
+                print(f"📥 [CONTEXT_SYNC] Code appended manually to _messages")
+            else:
+                print(f"❌ [CONTEXT_ERROR] Attribute not found. dir: {dir(chat_ctx)}")
+                
+        except Exception as e:
+            print(f"❌ [CONTEXT_FATAL] Manual append failed: {e}")
+
+    # def update_code_context(self, code: str, chat_ctx: llm.ChatContext):
+    #     """Injects code as a USER turn so the LLM 'hears' the update."""
+    #     self.current_code = code
+    #     # Check if the SDK expects a list of content parts
+    #     # We wrap the text in a list to satisfy the 'Input should be a valid list' requirement
+    #     # content_payload = [llm.ChatContent(text=f"CANDIDATE CODE UPDATE:\n{code}")]
+    #     # # We add this as a USER role so the LLM treats it as an active event in the conversation
+    #     # print(f"DEBUG: [CODE_CONTEXT] Preparing to append code to chat context")
+    #     # print(f"DEBUG: chat_ctx type: {type(chat_ctx)}, messages type: {type(chat_ctx.messages)}")
+    #     # print(f"DEBUG: Last message before code append: {chat_ctx.messages[-1] if chat_ctx.messages else 'No messages yet'}")
+    #     # code_message = llm.ChatMessage(
+    #     #     role="user", 
+    #     #     # content=f"CANDIDATE CODE UPDATE:\n{code}"
+    #     #     content=content_payload
+    #     # )
+    #     # chat_ctx.messages.append(code_message)
+    #     # print(f"📥 [CONTEXT_SYNC] Code appended to timeline")
+        
+    #     # .create() handles the 'typing.Union' logic internally so you don't have to
+    #     code_message = llm.ChatMessage(
+    #         role="user", 
+    #         text=f"CANDIDATE CODE UPDATE:\n{code}"
+    #     )
+    #     print(f"DEBUG: [CODE_CONTEXT] Preparing to append code to chat context")
+    #     print(self.log_context_attributes(chat_ctx))
+    #     try:
+    #         # Safely find the messages list (some versions use _messages, some use messages)
+    #         msgs_list = getattr(chat_ctx, '_messages', getattr(chat_ctx, 'messages', None))
+            
+    #         if msgs_list is not None:
+    #             msgs_list.append(code_message)
+    #             print(f"📥 [CONTEXT_SYNC] Code appended to timeline")
+    #         else:
+    #             print("❌ [CONTEXT_ERROR] Could not find messages list in ChatContext")
+    #     except Exception as e:
+    #         print(f"❌ [CONTEXT_FATAL] {e}")
+    #     #     chat_ctx.messages.append(code_message)
+    #     #     print(f"📥 [CONTEXT_SYNC] Code appended successfully")
+    #     # except Exception as e:
+    #     #     print(f"❌ [CONTEXT_ERROR] Factory method failed: {e}")
+    #     #     # Absolute fallback: Raw dictionary (some SDK versions prefer this)
+    #     #     chat_ctx.messages.append({
+    #     #         "role": "user",
+    #     #         "content": f"CANDIDATE CODE UPDATE:\n{code}"
+    #     #     })
+
+    # async def tts_node(self, text_stream, model_settings):
+    #     async def monitor_text(stream):
+    #         full_text = ""
+    #         async for text in stream:
+    #             try:
+    #                 # STRIP token from any tts chunk so frontend doesn't see it
+    #                 if isinstance(text, str) and re.search(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", text, flags=re.IGNORECASE):
+    #                     # Found token in TTS chunk — clean and trigger immediate signal if not already done
+    #                     clean_text = re.sub(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", "", text, flags=re.IGNORECASE)
+    #                     print(f"DEBUG: [TTS_CHUNK_MATCH] raw='{text[:120]}' cleaned='{(clean_text or '')[:120]}'")
+    #                     # If the end-signal hasn't been sent yet, ensure we send it now.
+    #                     try:
+    #                         if not getattr(self, '_end_signal_event', None) or not self._end_signal_event.is_set():
+    #                             print(f"DEBUG: [TTS_TRIGGER] initiating immediate signal from tts_node for {self.session_id}")
+    #                             await self.immediate_signal_and_db()
+    #                     except Exception as e:
+    #                         print(f"❌ [TTS_TRIGGER_ERR] {e}")
+    #                 else:
+    #                     clean_text = text.replace('[[END_INTERVIEW]]', '') if isinstance(text, str) else text
+    #             except Exception:
+    #                 clean_text = text
+
+    #             # Debug: log potential token fragments or notable chunks
+    #             try:
+    #                 if isinstance(text, str) and ("[[" in text or "END_INTERVIEW" in text or "END INTERVIEW" in text):
+    #                     print(f"DEBUG: [TTS_CHUNK] raw='{text[:120]}' cleaned='{(clean_text or '')[:120]}'")
+    #             except Exception:
+    #                 pass
+
+    #             if isinstance(clean_text, str) and clean_text.strip():
+    #                 full_text += clean_text
+
+    #             # Yield cleaned text to the downstream TTS pipeline
+    #             yield clean_text
+
+    #         if full_text.strip() and self._room:
+    #             try:
+    #                 # Debug: show outgoing assistant transcript
+    #                 print(f"DEBUG: [TTS_PUBLISH] assistant transcript length={len(full_text.strip())}")
+    #                 transcript_data = json.dumps({
+    #                     "type": "transcript",
+    #                     "role": "assistant",
+    #                     "content": full_text.strip()
+    #                 })
+    #                 # Wait briefly for the end-signal to be sent so ordering is preserved
+    #                 try:
+    #                     await asyncio.wait_for(self._end_signal_event.wait(), timeout=2)
+    #                     print('DEBUG: [TTS_WAIT] end-signal observed before publish')
+    #                 except asyncio.TimeoutError:
+    #                     print('DEBUG: [TTS_WAIT] timeout while waiting for end-signal (proceeding)')
+
+    #                 await self._room.local_participant.publish_data(
+    #                     transcript_data.encode('utf-8'),
+    #                     reliable=True
+    #                 )
+    #                 print("✅ [TTS_PUBLISHED] assistant transcript sent to frontend")
+    #             except Exception as e:
+    #                 print(f"❌ Failed to send transcript: {e}")
+
+    #     return Agent.default.tts_node(self, monitor_text(text_stream), model_settings)
+
+    # async def llm_node(self, chat_ctx: llm.ChatContext, tools, model_settings):
+    #     """Intercept LLM output stream and react to the end-interview token."""
+    #     print(f"DEBUG: [LLM_NODE] Processing new turn for session {self.session_id}")
+    #     async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
+    #         try:
+    #             # Normalize content extraction for different chunk shapes
+    #             content = None
+    #             if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
+    #                 delta = getattr(chunk.choices[0], 'delta', None)
+    #                 content = getattr(delta, 'content', None)
+    #             elif isinstance(chunk, str):
+    #                 content = chunk
+
+    #             # Debug: log potential token fragments
+    #             try:
+    #                 if isinstance(content, str) and ("[[" in content or "END_INTERVIEW" in content or "END INTERVIEW" in content):
+    #                     print(f"DEBUG: [LLM_CHUNK_INTERCEPT] Potential token fragment: '{content[:160]}'")
+    #             except Exception:
+    #                 pass
+
+    #             # Check for several token shapes using regex to avoid misses
+    #             if content and isinstance(content, str) and re.search(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", content, flags=re.IGNORECASE):
+    #                 print(f"🎯🎯🎯 [MATCH] FOUND END TOKEN IN STREAM")
+
+    #                 # 1. Strip the token so downstream TTS/transcript doesn't see it
+    #                 try:
+    #                     if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
+    #                         new_content = re.sub(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", "", content, flags=re.IGNORECASE)
+    #                         chunk.choices[0].delta.content = new_content
+    #                         print(f"DEBUG: [LLM_STRIP] chunk content cleaned to '{(new_content or '')[:160]}'")
+    #                 except Exception as e:
+    #                     print(f"❌ [STRIP_ERR] {e}")
+
+    #                 # 2. Trigger evaluation and close immediately (synchronous within this turn)
+    #                 try:
+    #                     print(f"DEBUG: [SHUTDOWN] Sending immediate signal for {self.session_id}")
+    #                     await self.immediate_signal_and_db()
+    #                 except Exception as e:
+    #                     print(f"❌ [IMMEDIATE_SIGNAL_ERR] {e}")
+    #         except Exception as e:
+    #             print(f"❌ [LLM_NODE_ERROR] {e}")
+    #         yield chunk
+
 
     async def tts_node(self, text_stream, model_settings):
-        async def monitor_text(stream):
-            full_text = ""
-            async for text in stream:
-                try:
-                    # STRIP token from any tts chunk so frontend doesn't see it
-                    if isinstance(text, str) and re.search(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", text, flags=re.IGNORECASE):
-                        # Found token in TTS chunk — clean and trigger immediate signal if not already done
-                        clean_text = re.sub(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", "", text, flags=re.IGNORECASE)
-                        print(f"DEBUG: [TTS_CHUNK_MATCH] raw='{text[:120]}' cleaned='{(clean_text or '')[:120]}'")
-                        # If the end-signal hasn't been sent yet, ensure we send it now.
-                        try:
-                            if not getattr(self, '_end_signal_event', None) or not self._end_signal_event.is_set():
-                                print(f"DEBUG: [TTS_TRIGGER] initiating immediate signal from tts_node for {self.session_id}")
-                                await self.immediate_signal_and_db()
-                        except Exception as e:
-                            print(f"❌ [TTS_TRIGGER_ERR] {e}")
-                    else:
-                        clean_text = text.replace('[[END_INTERVIEW]]', '') if isinstance(text, str) else text
-                except Exception:
-                    clean_text = text
-
-                # Debug: log potential token fragments or notable chunks
-                try:
-                    if isinstance(text, str) and ("[[" in text or "END_INTERVIEW" in text or "END INTERVIEW" in text):
-                        print(f"DEBUG: [TTS_CHUNK] raw='{text[:120]}' cleaned='{(clean_text or '')[:120]}'")
-                except Exception:
-                    pass
-
-                if isinstance(clean_text, str) and clean_text.strip():
-                    full_text += clean_text
-
-                # Yield cleaned text to the downstream TTS pipeline
-                yield clean_text
-
-            if full_text.strip() and self._room:
-                try:
-                    # Debug: show outgoing assistant transcript
-                    print(f"DEBUG: [TTS_PUBLISH] assistant transcript length={len(full_text.strip())}")
-                    transcript_data = json.dumps({
-                        "type": "transcript",
-                        "role": "assistant",
-                        "content": full_text.strip()
-                    })
-                    # Wait briefly for the end-signal to be sent so ordering is preserved
-                    try:
-                        await asyncio.wait_for(self._end_signal_event.wait(), timeout=2)
-                        print('DEBUG: [TTS_WAIT] end-signal observed before publish')
-                    except asyncio.TimeoutError:
-                        print('DEBUG: [TTS_WAIT] timeout while waiting for end-signal (proceeding)')
-
-                    await self._room.local_participant.publish_data(
-                        transcript_data.encode('utf-8'),
-                        reliable=True
-                    )
-                    print("✅ [TTS_PUBLISHED] assistant transcript sent to frontend")
-                except Exception as e:
-                    print(f"❌ Failed to send transcript: {e}")
-
-        return Agent.default.tts_node(self, monitor_text(text_stream), model_settings)
-
-    async def llm_node(self, chat_ctx: llm.ChatContext, tools, model_settings):
-        """Intercept LLM output stream and react to the end-interview token."""
-        print(f"DEBUG: [LLM_NODE] Processing new turn for session {self.session_id}")
-        async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
-            try:
-                # Normalize content extraction for different chunk shapes
-                content = None
-                if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
-                    delta = getattr(chunk.choices[0], 'delta', None)
-                    content = getattr(delta, 'content', None)
-                elif isinstance(chunk, str):
-                    content = chunk
-
-                # Debug: log potential token fragments
-                try:
-                    if isinstance(content, str) and ("[[" in content or "END_INTERVIEW" in content or "END INTERVIEW" in content):
-                        print(f"DEBUG: [LLM_CHUNK_INTERCEPT] Potential token fragment: '{content[:160]}'")
-                except Exception:
-                    pass
-
-                # Check for several token shapes using regex to avoid misses
-                if content and isinstance(content, str) and re.search(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", content, flags=re.IGNORECASE):
-                    print(f"🎯🎯🎯 [MATCH] FOUND END TOKEN IN STREAM")
-
-                    # 1. Strip the token so downstream TTS/transcript doesn't see it
-                    try:
-                        if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
-                            new_content = re.sub(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", "", content, flags=re.IGNORECASE)
-                            chunk.choices[0].delta.content = new_content
-                            print(f"DEBUG: [LLM_STRIP] chunk content cleaned to '{(new_content or '')[:160]}'")
-                    except Exception as e:
-                        print(f"❌ [STRIP_ERR] {e}")
-
-                    # 2. Trigger evaluation and close immediately (synchronous within this turn)
-                    try:
-                        print(f"DEBUG: [SHUTDOWN] Sending immediate signal for {self.session_id}")
-                        await self.immediate_signal_and_db()
-                    except Exception as e:
-                        print(f"❌ [IMMEDIATE_SIGNAL_ERR] {e}")
-            except Exception as e:
-                print(f"❌ [LLM_NODE_ERROR] {e}")
-            yield chunk
-
-    async def immediate_signal_and_db(self):
-        """Generate REAL LLM evaluation before signaling end."""
-        try:
-            print(f"🤖 [EVAL_START] Generating real evaluation for {self.session_id}")
-
-            # 1. BUILD CONTEXT FOR EVALUATION (use session.chat_ctx)
-            eval_context = []
-            session = getattr(self, '_session', None)
-            print(f"🔍 [EVAL_DEBUG] Session available: {session is not None}")
-
-            if session and getattr(session, 'chat_ctx', None) and getattr(session.chat_ctx, 'messages', None):
-                for msg in session.chat_ctx.messages[-20:]:
-                    try:
-                        if getattr(msg, 'role', None) in ['user', 'assistant'] and getattr(msg, 'content', None):
-                            content = str(getattr(msg, 'content', '')).strip()
-                            if content and not content.startswith('CANDIDATE CODE'):
-                                role = 'Candidate' if getattr(msg, 'role') == 'user' else 'Interviewer'
-                                eval_context.append(f"{role}: {content}")
-                    except Exception:
+            async def monitor_text(stream):
+                full_text = ""
+                async for text in stream:
+                    # 1. Handle potential List/Union types coming from the LLM
+                    if not isinstance(text, str):
                         continue
 
-            # Add final code if present
+                    try:
+                        # 2. STRIP token and check for ending
+                        if re.search(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", text, flags=re.IGNORECASE):
+                            clean_text = re.sub(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", "", text, flags=re.IGNORECASE)
+                            # Trigger shutdown logic
+                            if not self._end_signal_event.is_set():
+                                asyncio.create_task(self.immediate_signal_and_db())
+                        else:
+                            clean_text = text.replace('[[END_INTERVIEW]]', '')
+                    except Exception:
+                        clean_text = text
+
+                    if clean_text.strip():
+                        full_text += clean_text
+
+                    yield clean_text
+
+                # 3. SEND TRANSCRIPT AFTER STREAM COMPLETES
+                if full_text.strip() and self._room:
+                    try:
+                        transcript_data = json.dumps({
+                            "type": "transcript",
+                            "role": "assistant",
+                            "content": full_text.strip()
+                        })
+                        # Use the reliable room local participant to publish
+                        await self._room.local_participant.publish_data(
+                            transcript_data.encode('utf-8'),
+                            reliable=True
+                        )
+                        print(f"✅ [TTS_TRANSCRIPT_SENT] {full_text[:30]}...")
+                    except Exception as e:
+                        print(f"❌ [TTS_TRANSCRIPT_FAIL] {e}")
+
+            return Agent.default.tts_node(self, monitor_text(text_stream), model_settings)
+#     async def immediate_signal_and_db(self):
+#         """Generate REAL LLM evaluation before signaling end."""
+#         try:
+#             print(f"🤖 [EVAL_START] Generating real evaluation for {self.session_id}")
+
+#             # 1. BUILD CONTEXT FOR EVALUATION (use session.chat_ctx)
+#             eval_context = []
+#             session = getattr(self, '_session', None)
+#             print(f"🔍 [EVAL_DEBUG] Session available: {session is not None}")
+
+#             if session and getattr(session, 'chat_ctx', None) and getattr(session.chat_ctx, 'messages', None):
+#                 for msg in session.chat_ctx.messages[-20:]:
+#                     try:
+#                         if getattr(msg, 'role', None) in ['user', 'assistant'] and getattr(msg, 'content', None):
+#                             content = str(getattr(msg, 'content', '')).strip()
+#                             if content and not content.startswith('CANDIDATE CODE'):
+#                                 role = 'Candidate' if getattr(msg, 'role') == 'user' else 'Interviewer'
+#                                 eval_context.append(f"{role}: {content}")
+#                     except Exception:
+#                         continue
+
+#             # Add final code if present
+#             try:
+#                 if getattr(self, 'current_code', '') and str(self.current_code).strip():
+#                     eval_context.append(f"\nFINAL CODE:\n{self.current_code}")
+#             except Exception:
+#                 pass
+
+#             context_str = "\n\n".join(eval_context[-15:])
+#             print(f"📚 [CONTEXT] {len(eval_context)} messages → {len(context_str)} chars")
+
+#             # 2. LLM EVALUATION PROMPT
+#             eval_prompt = f"""# EVALUATION TASK
+# Review this coding interview and generate structured feedback:
+
+# CONTEXT:
+# {context_str}
+
+# Generate JSON evaluation with:
+# {{"strengths": ["bullet 1", "bullet 2"], 
+#   "improvements": ["bullet 1", "bullet 2"], 
+#   "edgeCases": ["case 1", "case 2"], 
+#   "nextSteps": ["action 1", "action 2"],
+#   "overallScore": "A/B/C/D/F",
+#   "technicalLevel": "Junior/Mid/Senior"}}
+
+# Be specific about code quality, problem-solving, communication.
+# Keep each bullet 1 sentence max."""
+
+#             # 3. CALL GROQ SDK FOR EVALUATION (sync client run in executor)
+#             try:
+#                 loop = asyncio.get_event_loop()
+#                 response = await loop.run_in_executor(
+#                     None,
+#                     lambda: Groq(api_key=os.getenv("GROQ_API_KEY")).chat.completions.create(
+#                         model="llama-3.1-8b-instant",
+#                         messages=[{"role": "user", "content": eval_prompt}],
+#                         temperature=0.3,
+#                         max_tokens=800
+#                     )
+#                 )
+#                 try:
+#                     eval_raw = response.choices[0].message.content.strip()
+#                 except Exception:
+#                     eval_raw = str(response).strip()
+#                 print(f"📊 [LLM_EVAL_RAW] {eval_raw[:300]}...")
+#             except Exception as e:
+#                 print(f"❌ [GROQ_ERROR] {e}")
+#                 eval_raw = ""
+
+#             # 4. PARSE JSON EVALUATION
+#             try:
+#                 json_match = re.search(r'\{.*\}', eval_raw, re.DOTALL)
+#                 if json_match:
+#                     eval_json_str = json_match.group()
+#                     evaluation = json.loads(eval_json_str)
+#                 else:
+#                     evaluation = json.loads(eval_raw)
+#             except Exception as e:
+#                 print(f"⚠️ [EVAL_PARSE_FAIL] {e}, using fallback")
+#                 evaluation = {
+#                     "strengths": ["Evaluation generation failed - review manually"],
+#                     "improvements": [],
+#                     "edgeCases": [],
+#                     "nextSteps": ["Follow up with candidate"],
+#                     "overallScore": "TBD",
+#                     "technicalLevel": "Unknown"
+#                 }
+
+#             print(f"✅ [REAL_EVAL_GENERATED]")
+#             print(f"   Strengths: {evaluation.get('strengths', [])}")
+#             print(f"   Score: {evaluation.get('overallScore', 'N/A')}")
+#             print(f"   Level: {evaluation.get('technicalLevel', 'N/A')}")
+
+#             # 5. COLLECT TRANSCRIPTS FROM MONGO
+#             schema_transcripts = []
+#             try:
+#                 doc = sessions_collection.find_one({'sessionId': self.session_id})
+#                 if doc and isinstance(doc.get('transcripts'), list):
+#                     for t in doc.get('transcripts', []):
+#                         role_raw = t.get('role') if isinstance(t, dict) else None
+#                         role = 'user' if role_raw == 'user' else 'assistant'
+#                         content = (t.get('content') if isinstance(t, dict) else str(t)) or ''
+#                         content = content.strip()
+#                         if content:
+#                             schema_transcripts.append({
+#                                 'role': role,
+#                                 'content': content,
+#                                 'timestamp': t.get('timestamp') if isinstance(t, dict) and t.get('timestamp') else None
+#                             })
+#             except Exception as e:
+#                 print(f"⚠️ [TRANSCRIPTS_READ_ERR] {e}")
+
+#             # 6. POST TO BACKEND WITH REAL EVALUATION
+#             backend_url = os.getenv('BACKEND_URL', 'http://localhost:5000')
+#             eval_endpoint = f"{backend_url}/api/sessions/{self.session_id}/evaluation"
+
+#             payload = {
+#                 'status': 'evaluated',
+#                 'endedAt': datetime.datetime.utcnow().isoformat(),
+#                 'finalCode': self.current_code or '',
+#                 'transcripts': schema_transcripts,
+#                 'evaluation': {
+#                     **evaluation,
+#                     'generatedAt': datetime.datetime.utcnow().isoformat()
+#                 }
+#             }
+
+#             async with aiohttp.ClientSession() as session:
+#                 try:
+#                     print(f"📡 [HTTP_POST] Sending REAL evaluation to {eval_endpoint}")
+#                     resp = await session.put(eval_endpoint, json=payload, timeout=10)
+#                     text = await resp.text()
+#                     if resp.status in (200, 201):
+#                         print(f"✅ [BACKEND_ACCEPTED] Real evaluation saved!")
+#                     else:
+#                         print(f"❌ [BACKEND_ERROR] {resp.status}: {text}")
+#                 except Exception as e:
+#                     print(f"❌ [HTTP_FAIL] {e}")
+
+#             # 7. CONTINUE WITH SIGNAL + CLEANUP
+#             try:
+#                 await self._send_end_signal()
+#             except Exception:
+#                 pass
+#             try:
+#                 self._end_signal_event.set()
+#             except Exception:
+#                 pass
+#             try:
+#                 asyncio.create_task(self._delayed_disconnect())
+#             except Exception:
+#                 pass
+
+#         except Exception as e:
+#             print(f"❌ [REAL_EVAL_FATAL] {e}")
+#             # Fallback to old placeholder logic
+#             try:
+#                 await self._send_end_signal()
+#             except Exception:
+#                 pass
+
+
+    async def immediate_signal_and_db(self):
+            """Fixed: Safe memory access + Backend POST + Real Transcript storage."""
             try:
-                if getattr(self, 'current_code', '') and str(self.current_code).strip():
-                    eval_context.append(f"\nFINAL CODE:\n{self.current_code}")
-            except Exception:
-                pass
+                print(f"🤖 [EVAL_START] Generating real evaluation for {self.session_id}")
 
-            context_str = "\n\n".join(eval_context[-15:])
-            print(f"📚 [CONTEXT] {len(eval_context)} messages → {len(context_str)} chars")
+                # 1. BUILD CONTEXT FOR EVALUATION
+                eval_context = []
+                session = getattr(self, '_session', None)
+                
+                # Accessing private _chat_ctx found in your debug logs
+                ctx_obj = getattr(session, '_chat_ctx', getattr(session, 'chat_ctx', None))
 
-            # 2. LLM EVALUATION PROMPT
-            eval_prompt = f"""# EVALUATION TASK
-Review this coding interview and generate structured feedback:
+                if ctx_obj and hasattr(ctx_obj, 'messages'):
+                    # Grab more history (25 turns) for a better evaluation
+                    for msg in ctx_obj.messages[-25:]:
+                        try:
+                            # --- FIX FOR Union/List Content Error ---
+                            content_raw = msg.content
+                            if isinstance(content_raw, list):
+                                # Extract text from the list of ChatContent objects
+                                text_content = " ".join([part.text for part in content_raw if hasattr(part, 'text')])
+                            else:
+                                text_content = str(content_raw)
 
-CONTEXT:
-{context_str}
+                            text_content = text_content.strip()
+                            
+                            # Only add actual conversation, skip the raw code update blocks for the transcript
+                            if text_content and not text_content.startswith('CANDIDATE CODE UPDATE'):
+                                role = 'Candidate' if msg.role == 'user' else 'Interviewer'
+                                eval_context.append(f"{role}: {text_content}")
+                        except Exception as e:
+                            print(f"⚠️ [EVAL_MSG_SKIP] {e}")
+                            continue
 
-Generate JSON evaluation with:
-{{"strengths": ["bullet 1", "bullet 2"], 
-  "improvements": ["bullet 1", "bullet 2"], 
-  "edgeCases": ["case 1", "case 2"], 
-  "nextSteps": ["action 1", "action 2"],
-  "overallScore": "A/B/C/D/F",
-  "technicalLevel": "Junior/Mid/Senior"}}
+                # Add final code block to the context so LLM can grade the actual code
+                if self.current_code:
+                    eval_context.append(f"\nFINAL SOURCE CODE:\n{self.current_code}")
 
-Be specific about code quality, problem-solving, communication.
-Keep each bullet 1 sentence max."""
+                context_str = "\n\n".join(eval_context)
+                print(f"📚 [CONTEXT] Collected {len(eval_context)} conversation items")
 
-            # 3. CALL GROQ SDK FOR EVALUATION (sync client run in executor)
-            try:
+                # 2. LLM EVALUATION PROMPT
+                eval_prompt = f"""# EVALUATION TASK
+    Review this coding interview and generate structured JSON feedback.
+
+    CONTEXT:
+    {context_str}
+
+    Generate JSON evaluation exactly like this:
+    {{
+    "strengths": ["bullet 1", "bullet 2"], 
+    "improvements": ["bullet 1", "bullet 2"], 
+    "edgeCases": ["case 1", "case 2"], 
+    "nextSteps": ["action 1", "action 2"],
+    "overallScore": "A/B/C/D/F",
+    "technicalLevel": "Junior/Mid/Senior"
+    }}"""
+
+                # 3. CALL GROQ SDK (Run sync call in executor)
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(
                     None,
                     lambda: Groq(api_key=os.getenv("GROQ_API_KEY")).chat.completions.create(
                         model="llama-3.1-8b-instant",
                         messages=[{"role": "user", "content": eval_prompt}],
-                        temperature=0.3,
-                        max_tokens=800
+                        temperature=0.1,
+                        response_format={ "type": "json_object" }
                     )
                 )
+                
                 try:
                     eval_raw = response.choices[0].message.content.strip()
-                except Exception:
-                    eval_raw = str(response).strip()
-                print(f"📊 [LLM_EVAL_RAW] {eval_raw[:300]}...")
-            except Exception as e:
-                print(f"❌ [GROQ_ERROR] {e}")
-                eval_raw = ""
-
-            # 4. PARSE JSON EVALUATION
-            try:
-                json_match = re.search(r'\{.*\}', eval_raw, re.DOTALL)
-                if json_match:
-                    eval_json_str = json_match.group()
-                    evaluation = json.loads(eval_json_str)
-                else:
                     evaluation = json.loads(eval_raw)
-            except Exception as e:
-                print(f"⚠️ [EVAL_PARSE_FAIL] {e}, using fallback")
-                evaluation = {
-                    "strengths": ["Evaluation generation failed - review manually"],
-                    "improvements": [],
-                    "edgeCases": [],
-                    "nextSteps": ["Follow up with candidate"],
-                    "overallScore": "TBD",
-                    "technicalLevel": "Unknown"
-                }
-
-            print(f"✅ [REAL_EVAL_GENERATED]")
-            print(f"   Strengths: {evaluation.get('strengths', [])}")
-            print(f"   Score: {evaluation.get('overallScore', 'N/A')}")
-            print(f"   Level: {evaluation.get('technicalLevel', 'N/A')}")
-
-            # 5. COLLECT TRANSCRIPTS FROM MONGO
-            schema_transcripts = []
-            try:
-                doc = sessions_collection.find_one({'sessionId': self.session_id})
-                if doc and isinstance(doc.get('transcripts'), list):
-                    for t in doc.get('transcripts', []):
-                        role_raw = t.get('role') if isinstance(t, dict) else None
-                        role = 'user' if role_raw == 'user' else 'assistant'
-                        content = (t.get('content') if isinstance(t, dict) else str(t)) or ''
-                        content = content.strip()
-                        if content:
-                            schema_transcripts.append({
-                                'role': role,
-                                'content': content,
-                                'timestamp': t.get('timestamp') if isinstance(t, dict) and t.get('timestamp') else None
-                            })
-            except Exception as e:
-                print(f"⚠️ [TRANSCRIPTS_READ_ERR] {e}")
-
-            # 6. POST TO BACKEND WITH REAL EVALUATION
-            backend_url = os.getenv('BACKEND_URL', 'http://localhost:5000')
-            eval_endpoint = f"{backend_url}/api/sessions/{self.session_id}/evaluation"
-
-            payload = {
-                'status': 'evaluated',
-                'endedAt': datetime.datetime.utcnow().isoformat(),
-                'finalCode': self.current_code or '',
-                'transcripts': schema_transcripts,
-                'evaluation': {
-                    **evaluation,
-                    'generatedAt': datetime.datetime.utcnow().isoformat()
-                }
-            }
-
-            async with aiohttp.ClientSession() as session:
-                try:
-                    print(f"📡 [HTTP_POST] Sending REAL evaluation to {eval_endpoint}")
-                    resp = await session.put(eval_endpoint, json=payload, timeout=10)
-                    text = await resp.text()
-                    if resp.status in (200, 201):
-                        print(f"✅ [BACKEND_ACCEPTED] Real evaluation saved!")
-                    else:
-                        print(f"❌ [BACKEND_ERROR] {resp.status}: {text}")
                 except Exception as e:
-                    print(f"❌ [HTTP_FAIL] {e}")
+                    print(f"⚠️ [JSON_PARSE_FAIL] {e}")
+                    evaluation = {"strengths": ["Manual review required"]}
 
-            # 7. CONTINUE WITH SIGNAL + CLEANUP
-            try:
+                # 4. PREPARE PAYLOAD FOR DATABASE AND BACKEND
+                # We store the eval_context list as the 'transcripts' field
+                payload = {
+                    'status': 'evaluated',
+                    'endedAt': datetime.datetime.utcnow().isoformat(),
+                    'finalCode': self.current_code or '',
+                    'transcripts': eval_context, # THIS stores your conversation history!
+                    'evaluation': {
+                        **evaluation,
+                        'generatedAt': datetime.datetime.utcnow().isoformat()
+                    }
+                }
+
+                # 5. UPDATE MONGODB
+                # await loop.run_in_executor(None, lambda: sessions_collection.update_one(
+                #     {"sessionId": self.session_id},
+                #     {"$set": payload}
+                # ))
+                await loop.run_in_executor(None, lambda: local_db.update_session(self.session_id, payload))
+                print("✅ [DB_SUCCESS] Evaluation and transcript saved to Mongo.")
+
+                # 6. POST TO BACKEND API
+                backend_url = os.getenv('BACKEND_URL', 'http://localhost:5000')
+                eval_endpoint = f"{backend_url}/api/sessions/{self.session_id}/evaluation"
+
+                async with aiohttp.ClientSession() as http_session:
+                    try:
+                        print(f"📡 [HTTP_POST] Sending payload to {eval_endpoint}")
+                        resp = await http_session.put(eval_endpoint, json=payload, timeout=10)
+                        if resp.status in (200, 201):
+                            print(f"✅ [BACKEND_ACCEPTED] API updated successfully")
+                        else:
+                            text = await resp.text()
+                            print(f"❌ [BACKEND_ERROR] {resp.status}: {text}")
+                    except Exception as e:
+                        print(f"❌ [HTTP_FAIL] {e}")
+
+                # 7. CLEANUP AND DISCONNECT
                 await self._send_end_signal()
-            except Exception:
-                pass
-            try:
                 self._end_signal_event.set()
-            except Exception:
-                pass
-            try:
                 asyncio.create_task(self._delayed_disconnect())
-            except Exception:
-                pass
 
-        except Exception as e:
-            print(f"❌ [REAL_EVAL_FATAL] {e}")
-            # Fallback to old placeholder logic
-            try:
+            except Exception as e:
+                print(f"❌ [REAL_EVAL_FATAL] {e}")
                 await self._send_end_signal()
-            except Exception:
-                pass
 
     async def _send_end_signal(self):
         """Extracted signal logic for reuse."""
@@ -441,15 +693,22 @@ Keep each bullet 1 sentence max."""
             # 2. UPDATE DATABASE with evaluation
             try:
                 loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, lambda: sessions_collection.update_one(
-                    {"sessionId": self.session_id},
-                    {"$set": {
-                        "status": "completed",
-                        "finalCode": self.current_code,
-                        "evaluation": eval_placeholder,
-                        "completedAt": True
-                    }}
-                ))
+                # await loop.run_in_executor(None, lambda: sessions_collection.update_one(
+                #     {"sessionId": self.session_id},
+                #     {"$set": {
+                #         "status": "completed",
+                #         "finalCode": self.current_code,
+                #         "evaluation": eval_placeholder,
+                #         "completedAt": True
+                #     }}
+                # ))
+                update_data = {
+                    "status": "completed",
+                    "finalCode": self.current_code,
+                    "evaluation": eval_placeholder,
+                    "completedAt": True
+                }
+                await loop.run_in_executor(None, lambda: local_db.update_session(self.session_id, update_data))
                 print("✅ [DB_SUCCESS] Evaluation and status saved.")
             except Exception as e:
                 print(f"❌ [DB_ERR] {e}")
@@ -482,51 +741,157 @@ server = AgentServer()
 @server.rtc_session()
 async def entrypoint(ctx: JobContext):
     await ctx.connect()
+    _active_tasks = set()   
     candidate = await ctx.wait_for_participant()
-    print(f"🚀 Candidate connected: {candidate.identity}")
-    # Expose the current room to the log-forwarding handler
-    try:
-        global CURRENT_ROOM
-        CURRENT_ROOM = ctx.room
-        print(f"🔗 [CURRENT_ROOM_SET] {getattr(ctx.room, 'name', 'unknown')}")
-    except Exception as e:
-        print(f"❌ [CURRENT_ROOM_SET_ERROR] {e}")
-
-    # Track active tasks for the stream handler
-    _active_tasks = set()
+    global CURRENT_ROOM
+    CURRENT_ROOM = ctx.room
 
     loop = asyncio.get_event_loop()
+    local_db.print_all_sessions()
+    # Resolve Session ID
+    session_id = ctx.room.name.replace("interview-", "")
+    if ctx.room.metadata:
+        try:
+            metadata_json = json.loads(ctx.room.metadata)
+            session_id = metadata_json.get("sessionId", session_id)
+        except: pass
+
+    print(f"🚀 [START] Processing Session: {session_id}")
+
+    full_question_data = None
     try:
-        session_id = ctx.room.name
-        if ctx.room.metadata:
-            metadata = json.loads(ctx.room.metadata)
-            session_id = metadata.get("sessionId", session_id)
+        session_doc = None
+        # Increase attempts to 5 for better stability
+        for attempt in range(5):
+            session_doc = await loop.run_in_executor(None, lambda: local_db.get_session(session_id))
+            if session_doc:
+                print(f"✅ [DB_HIT] Session document found on attempt {attempt+1}")
+                break
+            print(f"⏳ [DB_RETRY] Session '{session_id}' not found, retrying...")
+            await asyncio.sleep(1.5)
+        
+        if session_doc:
+            meta = session_doc.get('metadata', {})
+            q_id = meta.get('questionId')
+            print(f"🔖 [METADATA] Extracted questionId: {q_id}")
+            
+            if q_id:
+                full_question_data = await loop.run_in_executor(None, lambda: local_db.get_question_by_id(q_id))
+        else:
+            print(f"❌ [DB_FAIL] Session '{session_id}' completely missing from DB after 5 tries.")
+            debug = local_db.get_debug_info()
+            print(f"💡 [DIAGNOSTIC] DB Status: {debug}")
 
-        session_data = await loop.run_in_executor(
-            None, lambda: sessions_collection.find_one({"sessionId": session_id})
-        )
-        question = session_data.get("questionsAsked", ["Tell me about yourself"])[0] if session_data else "Hello!"
     except Exception as e:
-        print(f"⚠️ DB Error: {e}")
-        question = "Tell me about yourself."
+        print(f"🚨 [ERROR] entrypoint DB logic: {e}")
 
-    assistant = InterviewAssistant(question, ctx.room, session_id=session_id)
+    # Fallback Data
+    if not full_question_data:
+        print("⚠️ [FALLBACK] Using generic instructions")
+        full_question_data = {
+            "title": "the assigned problem", 
+            "description": "the requirements shown on the screen",
+            "exampleInput": "the provided examples",
+            "exampleOutput": "the expected output",
+        }
+
+    print(f"📝 [PROMPT_PREP] Preparing AI Chris for problem: {full_question_data.get('title')}")
+
+    assistant = InterviewAssistant(full_question_data, ctx.room, session_id=session_id)
+    # try:
+    #     # 1. Try to get the clean ID from Room Metadata first
+    #     session_id = None
+    #     if ctx.room.metadata:
+    #         try:
+    #             metadata = json.loads(ctx.room.metadata)
+    #             session_id = metadata.get("sessionId")
+    #             print(f"📋 [METADATA] Successfully parsed SessionId: {session_id}")
+    #         except json.JSONDecodeError:
+    #             print("⚠️ [METADATA] Failed to parse JSON metadata")
+
+    #     # 2. Fallback: If metadata is empty, strip the prefix from the room name
+    #     if not session_id:
+    #         session_id = ctx.room.name.replace("interview-", "")
+    #         print(f"✂️ [STRIP] Using stripped room name as ID: {session_id}")
+    #     # 2. DEBUG: Print exactly what we are looking for
+    #     print(f"🔍 [DB_QUERY] Searching for sessionId: '{session_id}' in collection: {sessions_collection.name}")
+    #     # 3. Query MongoDB for the specific session created by your backend
+    #     session_data = await loop.run_in_executor(
+    #         None, lambda: sessions_collection.find_one({"sessionId": session_id})
+    #     )
+
+    #     if session_data and "questionsAsked" in session_data:
+    #         # Fetch the actual question title chosen by your backend
+    #         question = session_data["questionsAsked"][0]
+    #         print(f"✅ [DYNAMIC_FETCH] Found question from backend: {question}")
+    #     else:
+    #         # If DB lookup still fails, log exactly what we searched for
+    #         print(f"❌ [DB_ERR] No session found in DB for ID: {session_id}")
+    #         question = "the assigned coding problem" # Neutral fallback
+
+    # except Exception as e:
+    #     print(f"⚠️ [FATAL_FETCH_ERROR] {e}")
+    #     question = "the coding exercise"
+    # try:
+    #     session_id = ctx.room.name
+    #     if ctx.room.metadata:
+    #         metadata = json.loads(ctx.room.metadata)
+    #         session_id = metadata.get("sessionId", session_id)
+
+    #     session_data = await loop.run_in_executor(
+    #         None, lambda: sessions_collection.find_one({"sessionId": session_id})
+    #     )
+    #     question = session_data.get("questionsAsked", ["Tell me about yourself"])[0] if session_data else "Hello!"
+    # except Exception as e:
+    #     print(f"⚠️ DB Error: {e}")
+    #     question = "Tell me about yourself."
+          
+    # assistant = InterviewAssistant(question, ctx.room, session_id=session_id)
     # Session will be created next; attach it to the assistant after creation so it's defined
 
     session = AgentSession(
         vad=silero.VAD.load(),
         stt=deepgram.STT(model="nova-2"),
         llm=groq.LLM(model="llama-3.1-8b-instant"),
+        # tts=deepgram.TTS(
+        #     model="aura-asteria-en",
+        #     api_key=os.getenv("DEEPGRAM_API_KEY")
+        # )
         tts=elevenlabs.TTS(
             api_key=os.getenv("ELEVENLABS_API_KEY"),
+            # model="eleven_multilingual_v2",
             model="eleven_multilingual_v2",
             voice_id=os.getenv("ELEVENLABS_VOICE_ID")
         )
     )
-
+    # PRINT ALL ATTRIBUTES TO SEE THE REAL NAME
+    print(f"DEBUG: Session attributes: {dir(session)}")
     # Keep a reference to the session on the assistant so hidden evaluation can access chat_ctx
     assistant._session = session
+    
+    @session.on("agent_speech_committed")
+    def on_agent_speech_committed(msg: llm.ChatMessage):
+        """
+        This event triggers whenever Chris finishes generating a sentence.
+        It is the most reliable way to send transcripts to the frontend.
+        """
+        content = msg.content
+        if isinstance(content, list):
+            text = " ".join([part.text for part in content if hasattr(part, 'text')])
+        else:
+            text = str(content)
 
+        if text.strip():
+            print(f"🎙️ [AGENT_TRANSCRIPT] Sending: {text[:50]}...")
+            payload = json.dumps({
+                "type": "transcript",
+                "role": "assistant",
+                "content": text.strip()
+        })
+        # Use the loop to ensure it doesn't get lost in async transitions
+        asyncio.get_event_loop().call_soon_threadsafe(
+            lambda: asyncio.create_task(ctx.room.local_participant.publish_data(payload.encode('utf-8'), reliable=True))
+        )
     # --- DATA CHANNEL LISTENER: Listen for 'request_end' packets from frontend ---
     @ctx.room.on("data_received")
     def on_data_received(packet: rtc.DataPacket):
@@ -547,17 +912,30 @@ async def entrypoint(ctx: JobContext):
         try:
             # Wait for the complete code text from the stream
             code_content = await reader.read_all()
-            
             if code_content:
+            # SAFETY CHECK: Access the private _chat_ctx found in your logs
+                # ctx_obj = getattr(session, '_chat_ctx', None)
+                ctx_obj = getattr(session, '_chat_ctx', getattr(session, 'chat_ctx', None))
+                if ctx_obj:
+                    assistant.update_code_context(code_content, ctx_obj)
+                    if not session.is_speaking():
+                        print("🤖 [REPLY] Triggering AI thought process...")
+                        # In your version, calling this without 'await' inside the task
+                        # is the correct way to handle the SpeechHandle object
+                        session.generate_reply()
+                if ctx_obj is None:
+                    print("❌ [CRITICAL] Could not find _chat_ctx on session object")
+                    return
+            # if code_content:
                 # 1. Update the brain context
-                assistant.update_code_context(code_content, session.chat_ctx)
-                print(f"📝 [CODE_UPDATE] Code received from {participant_identity}, length={len(code_content)}")
-                print(f"-----\n{code_content}\n-----")
-                print(f"📥 [CODE_SYNC] Code context updated in LLM history")
+            # assistant.update_code_context(code_content, ctx_obj)
+            print(f"📝 [CODE_UPDATE] Code received from {participant_identity}, length={len(code_content)}")
+            print(f"-----\n{code_content}\n-----")
+            print(f"📥 [CODE_SYNC] Code context updated in LLM history")
                 # 2. Trigger the LLM to generate a reply (mimics speech committed)
-                asyncio.create_task(session.generate_reply())
+            # asyncio.create_task(session.generate_reply())
                 
-                print(f"📄 [STREAM] Received code update from {participant_identity}")
+            print(f"📄 [STREAM] Received code update from {participant_identity}")
         except Exception as e:
             print(f"⚠️ [STREAM_ERROR] {e}")
 
@@ -652,6 +1030,7 @@ async def entrypoint(ctx: JobContext):
             print(f"❌ [STT_FALLBACK_ERROR] {e}")
 
     await session.start(room=ctx.room, agent=assistant)
+    await asyncio.sleep(0.5)
     # Start a background task to monitor chat_ctx for new user messages
     async def monitor_chat_context():
         try:
@@ -705,7 +1084,7 @@ async def entrypoint(ctx: JobContext):
     
     # Initial Greeting
     await session.generate_reply(
-        instructions="Introduce yourself as Chris and ask if the candidate is ready to start discussing the problem. Follow Step 1 of your interview flow.'"
+        instructions=f"Introduce yourself as Chris and askk candidate weather he is ready to discuss the problem '{full_question_data.get('title')}'."
     )
 
     while True:

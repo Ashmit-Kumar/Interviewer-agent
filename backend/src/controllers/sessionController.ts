@@ -17,12 +17,21 @@ export class SessionController {
       // Initialize interview orchestrator
       const { question } = await interviewOrchestrator.initializeInterview(sessionId);
       console.log(`✅ Question selected: ${question.title}`);
+      // Log the selected questionId if present
+      try {
+        console.log(`🔖 Selected questionId: ${question.questionId || '(none)'}`);
+      } catch (e) {
+        console.log('🔖 Selected questionId: (unavailable)');
+      }
 
       // Create session in MongoDB
       const createdSession = await sessionRepository.create({
         sessionId,
         status: 'active',
         questionsAsked: [question.title],
+        // Persist the questionId both as top-level and in metadata for compatibility
+        questionId: question.questionId,
+        metadata: { questionId: question.questionId },
         finalCode: '',
         transcripts: [],
       });
@@ -31,6 +40,12 @@ export class SessionController {
       console.log(`   SessionId: ${createdSession.sessionId}`);
       console.log(`   Status: ${createdSession.status}`);
       console.log(`   Questions: ${createdSession.questionsAsked.length}`);
+      // Explicitly log stored metadata (helps verify questionId persisted)
+      try {
+        console.log(`   Stored metadata.questionId: ${createdSession.metadata?.questionId ?? '(none)'}`);
+      } catch (e) {
+        console.log('   Stored metadata: (unavailable)');
+      }
       // console.log(`   Database: ${createdSession.constructor.modelName}`);
       console.log(`${'='.repeat(60)}\n`);
 

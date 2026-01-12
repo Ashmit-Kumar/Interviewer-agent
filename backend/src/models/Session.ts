@@ -2,6 +2,7 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ISession extends Document {
   sessionId: string;
+  questionId?: string;
   status: 'active' | 'ended' | 'evaluated';
   startedAt: Date;
   endedAt?: Date;
@@ -77,6 +78,11 @@ const SessionSchema: Schema = new Schema(
       generatedAt: Date,
     },
     vapiCallId: String,
+    // Optional top-level question identifier for easier queries
+    questionId: {
+      type: String,
+      index: true,
+    },
     metadata: Schema.Types.Mixed,
   },
   {
