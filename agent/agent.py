@@ -19,11 +19,6 @@ from livekit.agents.llm import ChatContext, ChatMessage, ChatRole
 load_dotenv()
 logging.getLogger('pymongo').setLevel(logging.WARNING)
 logging.getLogger('livekit').setLevel(logging.INFO)
-# mongo_client = pymongo.MongoClient(os.getenv("MONGODB_URI"))
-# db = mongo_client["interview-platform"]
-# sessions_collection = db["sessions"]    
-# CURRENT_ROOM = None
-# Global reference to the current LiveKit room for log-based forwarding
 CURRENT_ROOM = None
 
 
@@ -146,255 +141,95 @@ class InterviewAssistant(Agent):
                 - **Brevity**: 1-3 sentences maximum per turn to keep it conversational.
                 """
         )
-    # def log_context_attributes(self, chat_ctx):
-    #     print("--- CHAT CONTEXT DEBUG START ---")
-    #     print(f"Object Type: {type(chat_ctx)}")
-    #     print(f"All Attributes: {dir(chat_ctx)}")
-    #     # Try to see if it has a common private name like _messages
-    #     if hasattr(chat_ctx, '_messages'):
-    #         print(f"Found _messages! Count: {len(chat_ctx._messages)}")
-    #     print("--- CHAT CONTEXT DEBUG END ---")
+    def log_context_attributes(self, chat_ctx):
+        print("--- CHAT CONTEXT DEBUG START ---")
+        print(f"Object Type: {type(chat_ctx)}")
+        print(f"All Attributes: {dir(chat_ctx)}")
+        # Try to see if it has a common private name like _messages
+        if hasattr(chat_ctx, '_messages'):
+            print(f"Found _messages! Count: {len(chat_ctx._messages)}")
+        print("--- CHAT CONTEXT DEBUG END ---")
     
     
-    
-    
-    
-    
-    
+    #Pydantic v2 compatible version
     def update_code_context(self, code: str, chat_ctx: llm.ChatContext):
-        """Injects code as a USER turn so the LLM 'hears' the update."""
+        """Bulletproof code injection for LiveKit ChatContext."""
+        print(f"🔧 [UPDATE_CTX_1] Injecting code into context")
         self.current_code = code
         
+        code_msg = f"CANDIDATE CODE UPDATE:\n```js\n{code}\n```"
+        
         try:
-            content_part = llm.ChatContext(text=f"CANDIDATE CODE UPDATE:\n{code}")
-            # 1. Create the message using the list format required by Pydantic v2
-            new_msg = llm.ChatMessage(
-                role=llm.ChatRole.USER,
-                # content=[llm.TextContent(text=f"CANDIDATE CODE UPDATE:\n{code}")]
-                content=[content_part]
-            )
-
-            # 2. Append to the context safely
-            # Most LiveKit ChatContext objects expose a 'messages' list attribute
-            if hasattr(chat_ctx, 'messages'):
-                chat_ctx.messages.append(new_msg)
-                print(f"📥 [CONTEXT_SYNC] Code appended successfully to chat_ctx.messages")
-            else:
-                # Fallback for internal variations
-                msgs_list = getattr(chat_ctx, '_messages', None)
-                if msgs_list is not None:
-                    msgs_list.append(new_msg)
-                    print(f"📥 [CONTEXT_SYNC] Code appended to private _messages")
-                    
-        except Exception as e:
-            print(f"❌ [CONTEXT_FATAL] Failed to update code context: {e}")
-        
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    # def update_code_context(self, code: str, chat_ctx: llm.ChatContext):
-    #     """Injects code by bypassing factory methods and using private attributes."""
-    #     self.current_code = code
-        
-    #     # 1. Manually construct the message object
-    #     # Using a dictionary is the safest way to avoid the Union/Instantiate error
-    #     try:
-    #         # content_list = [llm.ChatContent(text=f"CANDIDATE CODE UPDATE:\n{code}")]
-    #         new_msg = llm.ChatMessage(
-    #             # Pydantic v2: content must be a list[ChatContent]
-    #             content=[llm.TextContent(text=f"CANDIDATE CODE UPDATE:\n{code}")],
-    #             role=llm.ChatRole.USER,
-    #         )
-    #         print(f"DEBUG: Created new_msg of type {type(new_msg)} with content type {type(new_msg.content)}")
-    #         # 2. Access the hidden messages list
-    #         # We use getattr to find _messages (which appeared in your dir() logs)
-    #         msgs_list = getattr(chat_ctx, '_messages', getattr(chat_ctx, 'messages', None))
+            # ✅ METHOD 1: Raw dict with LIST content (Pydantic compliant)
+            raw_message = {
+                "role": "user",
+                "content": [{"type": "text", "text": code_msg}]  # LIST of dicts!
+            }
             
-    #         if msgs_list is not None:
-    #             msgs_list.append(new_msg)
-    #             print(f"📥 [CONTEXT_SYNC] Code appended manually to _messages")
-    #         else:
-    #             print(f"❌ [CONTEXT_ERROR] Attribute not found. dir: {dir(chat_ctx)}")
+            # Try public messages first
+            if hasattr(chat_ctx, 'messages') and hasattr(chat_ctx.messages, 'append'):
+                chat_ctx.messages.append(raw_message)
+                print(f"✅ [UPDATE_CTX_2] SUCCESS: Raw message list appended")
+                return
                 
-    #     except Exception as e:
-    #         print(f"❌ [CONTEXT_FATAL] Manual append failed: {e}")
+            # Try private _messages  
+            elif hasattr(chat_ctx, '_messages') and hasattr(chat_ctx._messages, 'append'):
+                chat_ctx._messages.append(raw_message)
+                print(f"✅ [UPDATE_CTX_3] SUCCESS: Private _messages appended")
+                return
+                
+            # METHOD 2: Use ChatContext.create_message() if available
+            if hasattr(chat_ctx, 'create_message'):
+                chat_ctx.create_message(role="user", parts=[{"text": code_msg}])
+                print(f"✅ [UPDATE_CTX_4] SUCCESS: create_message() used")
+                return
+                
+            print("⚠️ [UPDATE_CTX_5] No direct append - using fallback storage")
+            
+        except Exception as e:
+            print(f"⚠️ [UPDATE_CTX_ERROR] {str(e)[:100]}")
+        
+        print("💡 Code stored in self.current_code for evaluation")
 
-
-
-
-
-
-
-
-
-
-
-
+    
+    
+    
+    
     # def update_code_context(self, code: str, chat_ctx: llm.ChatContext):
     #     """Injects code as a USER turn so the LLM 'hears' the update."""
+    #     print(f"🔧 [UPDATE_CTX_1] chat_ctx type: {type(chat_ctx)}, id={id(chat_ctx)}")
     #     self.current_code = code
-    #     # Check if the SDK expects a list of content parts
-    #     # We wrap the text in a list to satisfy the 'Input should be a valid list' requirement
-    #     # content_payload = [llm.ChatContent(text=f"CANDIDATE CODE UPDATE:\n{code}")]
-    #     # # We add this as a USER role so the LLM treats it as an active event in the conversation
-    #     # print(f"DEBUG: [CODE_CONTEXT] Preparing to append code to chat context")
-    #     # print(f"DEBUG: chat_ctx type: {type(chat_ctx)}, messages type: {type(chat_ctx.messages)}")
-    #     # print(f"DEBUG: Last message before code append: {chat_ctx.messages[-1] if chat_ctx.messages else 'No messages yet'}")
-    #     # code_message = llm.ChatMessage(
-    #     #     role="user", 
-    #     #     # content=f"CANDIDATE CODE UPDATE:\n{code}"
-    #     #     content=content_payload
-    #     # )
-    #     # chat_ctx.messages.append(code_message)
-    #     # print(f"📥 [CONTEXT_SYNC] Code appended to timeline")
         
-    #     # .create() handles the 'typing.Union' logic internally so you don't have to
-    #     code_message = llm.ChatMessage(
-    #         role="user", 
-    #         text=f"CANDIDATE CODE UPDATE:\n{code}"
-    #     )
-    #     print(f"DEBUG: [CODE_CONTEXT] Preparing to append code to chat context")
-    #     print(self.log_context_attributes(chat_ctx))
     #     try:
-    #         # Safely find the messages list (some versions use _messages, some use messages)
-    #         msgs_list = getattr(chat_ctx, '_messages', getattr(chat_ctx, 'messages', None))
+    #         code_msg = f"CANDIDATE CODE UPDATE:\n{code}"
+    #         print(f"🔧 [UPDATE_CTX_2] Creating ChatMessage...")
+    #         new_msg = llm.ChatMessage(
+    #             role="user", 
+    #             # content=[llm.ChatContent(text=code_msg)]
+    #             content=code_msg
+    #         )
+    #         print(f"✅ [UPDATE_CTX_3] new_msg created: {type(new_msg)}, content={type(new_msg.content)}")
             
-    #         if msgs_list is not None:
-    #             msgs_list.append(code_message)
-    #             print(f"📥 [CONTEXT_SYNC] Code appended to timeline")
+    #         print(f"🔧 [UPDATE_CTX_4] Testing chat_ctx.messages...")
+    #         if hasattr(chat_ctx, 'messages'):
+    #             print(f"✅ [UPDATE_CTX_5] messages attr found, len={len(chat_ctx.messages)}")
+    #             chat_ctx.messages.append(new_msg)
+    #             print(f"✅ [UPDATE_CTX_6] SUCCESS: Code appended to messages")
     #         else:
-    #             print("❌ [CONTEXT_ERROR] Could not find messages list in ChatContext")
+    #             print(f"🔧 [UPDATE_CTX_7] No messages attr, trying _messages...")
+    #             msgs_list = getattr(chat_ctx, '_messages', None)
+    #             if msgs_list:
+    #                 msgs_list.append(new_msg)
+    #                 print(f"✅ [UPDATE_CTX_8] SUCCESS: Code appended to _messages")
+    #             else:
+    #                 print("❌ [UPDATE_CTX_9] No messages OR _messages found!")
+                    
     #     except Exception as e:
-    #         print(f"❌ [CONTEXT_FATAL] {e}")
-    #     #     chat_ctx.messages.append(code_message)
-    #     #     print(f"📥 [CONTEXT_SYNC] Code appended successfully")
-    #     # except Exception as e:
-    #     #     print(f"❌ [CONTEXT_ERROR] Factory method failed: {e}")
-    #     #     # Absolute fallback: Raw dictionary (some SDK versions prefer this)
-    #     #     chat_ctx.messages.append({
-    #     #         "role": "user",
-    #     #         "content": f"CANDIDATE CODE UPDATE:\n{code}"
-    #     #     })
-
-    # async def tts_node(self, text_stream, model_settings):
-    #     async def monitor_text(stream):
-    #         full_text = ""
-    #         async for text in stream:
-    #             try:
-    #                 # STRIP token from any tts chunk so frontend doesn't see it
-    #                 if isinstance(text, str) and re.search(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", text, flags=re.IGNORECASE):
-    #                     # Found token in TTS chunk — clean and trigger immediate signal if not already done
-    #                     clean_text = re.sub(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", "", text, flags=re.IGNORECASE)
-    #                     print(f"DEBUG: [TTS_CHUNK_MATCH] raw='{text[:120]}' cleaned='{(clean_text or '')[:120]}'")
-    #                     # If the end-signal hasn't been sent yet, ensure we send it now.
-    #                     try:
-    #                         if not getattr(self, '_end_signal_event', None) or not self._end_signal_event.is_set():
-    #                             print(f"DEBUG: [TTS_TRIGGER] initiating immediate signal from tts_node for {self.session_id}")
-    #                             await self.immediate_signal_and_db()
-    #                     except Exception as e:
-    #                         print(f"❌ [TTS_TRIGGER_ERR] {e}")
-    #                 else:
-    #                     clean_text = text.replace('[[END_INTERVIEW]]', '') if isinstance(text, str) else text
-    #             except Exception:
-    #                 clean_text = text
-
-    #             # Debug: log potential token fragments or notable chunks
-    #             try:
-    #                 if isinstance(text, str) and ("[[" in text or "END_INTERVIEW" in text or "END INTERVIEW" in text):
-    #                     print(f"DEBUG: [TTS_CHUNK] raw='{text[:120]}' cleaned='{(clean_text or '')[:120]}'")
-    #             except Exception:
-    #                 pass
-
-    #             if isinstance(clean_text, str) and clean_text.strip():
-    #                 full_text += clean_text
-
-    #             # Yield cleaned text to the downstream TTS pipeline
-    #             yield clean_text
-
-    #         if full_text.strip() and self._room:
-    #             try:
-    #                 # Debug: show outgoing assistant transcript
-    #                 print(f"DEBUG: [TTS_PUBLISH] assistant transcript length={len(full_text.strip())}")
-    #                 transcript_data = json.dumps({
-    #                     "type": "transcript",
-    #                     "role": "assistant",
-    #                     "content": full_text.strip()
-    #                 })
-    #                 # Wait briefly for the end-signal to be sent so ordering is preserved
-    #                 try:
-    #                     await asyncio.wait_for(self._end_signal_event.wait(), timeout=2)
-    #                     print('DEBUG: [TTS_WAIT] end-signal observed before publish')
-    #                 except asyncio.TimeoutError:
-    #                     print('DEBUG: [TTS_WAIT] timeout while waiting for end-signal (proceeding)')
-
-    #                 await self._room.local_participant.publish_data(
-    #                     transcript_data.encode('utf-8'),
-    #                     reliable=True
-    #                 )
-    #                 print("✅ [TTS_PUBLISHED] assistant transcript sent to frontend")
-    #             except Exception as e:
-    #                 print(f"❌ Failed to send transcript: {e}")
-
-    #     return Agent.default.tts_node(self, monitor_text(text_stream), model_settings)
-
-    # async def llm_node(self, chat_ctx: llm.ChatContext, tools, model_settings):
-    #     """Intercept LLM output stream and react to the end-interview token."""
-    #     print(f"DEBUG: [LLM_NODE] Processing new turn for session {self.session_id}")
-    #     async for chunk in Agent.default.llm_node(self, chat_ctx, tools, model_settings):
-    #         try:
-    #             # Normalize content extraction for different chunk shapes
-    #             content = None
-    #             if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
-    #                 delta = getattr(chunk.choices[0], 'delta', None)
-    #                 content = getattr(delta, 'content', None)
-    #             elif isinstance(chunk, str):
-    #                 content = chunk
-
-    #             # Debug: log potential token fragments
-    #             try:
-    #                 if isinstance(content, str) and ("[[" in content or "END_INTERVIEW" in content or "END INTERVIEW" in content):
-    #                     print(f"DEBUG: [LLM_CHUNK_INTERCEPT] Potential token fragment: '{content[:160]}'")
-    #             except Exception:
-    #                 pass
-
-    #             # Check for several token shapes using regex to avoid misses
-    #             if content and isinstance(content, str) and re.search(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", content, flags=re.IGNORECASE):
-    #                 print(f"🎯🎯🎯 [MATCH] FOUND END TOKEN IN STREAM")
-
-    #                 # 1. Strip the token so downstream TTS/transcript doesn't see it
-    #                 try:
-    #                     if hasattr(chunk, 'choices') and len(chunk.choices) > 0:
-    #                         new_content = re.sub(r"\[\[\s*END[_ ]?INTERVIEW\s*\]\]", "", content, flags=re.IGNORECASE)
-    #                         chunk.choices[0].delta.content = new_content
-    #                         print(f"DEBUG: [LLM_STRIP] chunk content cleaned to '{(new_content or '')[:160]}'")
-    #                 except Exception as e:
-    #                     print(f"❌ [STRIP_ERR] {e}")
-
-    #                 # 2. Trigger evaluation and close immediately (synchronous within this turn)
-    #                 try:
-    #                     print(f"DEBUG: [SHUTDOWN] Sending immediate signal for {self.session_id}")
-    #                     await self.immediate_signal_and_db()
-    #                 except Exception as e:
-    #                     print(f"❌ [IMMEDIATE_SIGNAL_ERR] {e}")
-    #         except Exception as e:
-    #             print(f"❌ [LLM_NODE_ERROR] {e}")
-    #         yield chunk
-
-
+    #         print(f"💥 [UPDATE_CTX_FATAL] {type(e).__name__}: {e}")
+    #         import traceback
+    #         traceback.print_exc()
+        
+ 
     async def tts_node(self, text_stream, model_settings):
             async def monitor_text(stream):
                 full_text = ""
@@ -438,167 +273,6 @@ class InterviewAssistant(Agent):
                         print(f"❌ [TTS_TRANSCRIPT_FAIL] {e}")
 
             return Agent.default.tts_node(self, monitor_text(text_stream), model_settings)
-#     async def immediate_signal_and_db(self):
-#         """Generate REAL LLM evaluation before signaling end."""
-#         try:
-#             print(f"🤖 [EVAL_START] Generating real evaluation for {self.session_id}")
-
-#             # 1. BUILD CONTEXT FOR EVALUATION (use session.chat_ctx)
-#             eval_context = []
-#             session = getattr(self, '_session', None)
-#             print(f"🔍 [EVAL_DEBUG] Session available: {session is not None}")
-
-#             if session and getattr(session, 'chat_ctx', None) and getattr(session.chat_ctx, 'messages', None):
-#                 for msg in session.chat_ctx.messages[-20:]:
-#                     try:
-#                         if getattr(msg, 'role', None) in ['user', 'assistant'] and getattr(msg, 'content', None):
-#                             content = str(getattr(msg, 'content', '')).strip()
-#                             if content and not content.startswith('CANDIDATE CODE'):
-#                                 role = 'Candidate' if getattr(msg, 'role') == 'user' else 'Interviewer'
-#                                 eval_context.append(f"{role}: {content}")
-#                     except Exception:
-#                         continue
-
-#             # Add final code if present
-#             try:
-#                 if getattr(self, 'current_code', '') and str(self.current_code).strip():
-#                     eval_context.append(f"\nFINAL CODE:\n{self.current_code}")
-#             except Exception:
-#                 pass
-
-#             context_str = "\n\n".join(eval_context[-15:])
-#             print(f"📚 [CONTEXT] {len(eval_context)} messages → {len(context_str)} chars")
-
-#             # 2. LLM EVALUATION PROMPT
-#             eval_prompt = f"""# EVALUATION TASK
-# Review this coding interview and generate structured feedback:
-
-# CONTEXT:
-# {context_str}
-
-# Generate JSON evaluation with:
-# {{"strengths": ["bullet 1", "bullet 2"], 
-#   "improvements": ["bullet 1", "bullet 2"], 
-#   "edgeCases": ["case 1", "case 2"], 
-#   "nextSteps": ["action 1", "action 2"],
-#   "overallScore": "A/B/C/D/F",
-#   "technicalLevel": "Junior/Mid/Senior"}}
-
-# Be specific about code quality, problem-solving, communication.
-# Keep each bullet 1 sentence max."""
-
-#             # 3. CALL GROQ SDK FOR EVALUATION (sync client run in executor)
-#             try:
-#                 loop = asyncio.get_event_loop()
-#                 response = await loop.run_in_executor(
-#                     None,
-#                     lambda: Groq(api_key=os.getenv("GROQ_API_KEY")).chat.completions.create(
-#                         model="llama-3.1-8b-instant",
-#                         messages=[{"role": "user", "content": eval_prompt}],
-#                         temperature=0.3,
-#                         max_tokens=800
-#                     )
-#                 )
-#                 try:
-#                     eval_raw = response.choices[0].message.content.strip()
-#                 except Exception:
-#                     eval_raw = str(response).strip()
-#                 print(f"📊 [LLM_EVAL_RAW] {eval_raw[:300]}...")
-#             except Exception as e:
-#                 print(f"❌ [GROQ_ERROR] {e}")
-#                 eval_raw = ""
-
-#             # 4. PARSE JSON EVALUATION
-#             try:
-#                 json_match = re.search(r'\{.*\}', eval_raw, re.DOTALL)
-#                 if json_match:
-#                     eval_json_str = json_match.group()
-#                     evaluation = json.loads(eval_json_str)
-#                 else:
-#                     evaluation = json.loads(eval_raw)
-#             except Exception as e:
-#                 print(f"⚠️ [EVAL_PARSE_FAIL] {e}, using fallback")
-#                 evaluation = {
-#                     "strengths": ["Evaluation generation failed - review manually"],
-#                     "improvements": [],
-#                     "edgeCases": [],
-#                     "nextSteps": ["Follow up with candidate"],
-#                     "overallScore": "TBD",
-#                     "technicalLevel": "Unknown"
-#                 }
-
-#             print(f"✅ [REAL_EVAL_GENERATED]")
-#             print(f"   Strengths: {evaluation.get('strengths', [])}")
-#             print(f"   Score: {evaluation.get('overallScore', 'N/A')}")
-#             print(f"   Level: {evaluation.get('technicalLevel', 'N/A')}")
-
-#             # 5. COLLECT TRANSCRIPTS FROM MONGO
-#             schema_transcripts = []
-#             try:
-#                 doc = sessions_collection.find_one({'sessionId': self.session_id})
-#                 if doc and isinstance(doc.get('transcripts'), list):
-#                     for t in doc.get('transcripts', []):
-#                         role_raw = t.get('role') if isinstance(t, dict) else None
-#                         role = 'user' if role_raw == 'user' else 'assistant'
-#                         content = (t.get('content') if isinstance(t, dict) else str(t)) or ''
-#                         content = content.strip()
-#                         if content:
-#                             schema_transcripts.append({
-#                                 'role': role,
-#                                 'content': content,
-#                                 'timestamp': t.get('timestamp') if isinstance(t, dict) and t.get('timestamp') else None
-#                             })
-#             except Exception as e:
-#                 print(f"⚠️ [TRANSCRIPTS_READ_ERR] {e}")
-
-#             # 6. POST TO BACKEND WITH REAL EVALUATION
-#             backend_url = os.getenv('BACKEND_URL', 'http://localhost:5000')
-#             eval_endpoint = f"{backend_url}/api/sessions/{self.session_id}/evaluation"
-
-#             payload = {
-#                 'status': 'evaluated',
-#                 'endedAt': datetime.datetime.utcnow().isoformat(),
-#                 'finalCode': self.current_code or '',
-#                 'transcripts': schema_transcripts,
-#                 'evaluation': {
-#                     **evaluation,
-#                     'generatedAt': datetime.datetime.utcnow().isoformat()
-#                 }
-#             }
-
-#             async with aiohttp.ClientSession() as session:
-#                 try:
-#                     print(f"📡 [HTTP_POST] Sending REAL evaluation to {eval_endpoint}")
-#                     resp = await session.put(eval_endpoint, json=payload, timeout=10)
-#                     text = await resp.text()
-#                     if resp.status in (200, 201):
-#                         print(f"✅ [BACKEND_ACCEPTED] Real evaluation saved!")
-#                     else:
-#                         print(f"❌ [BACKEND_ERROR] {resp.status}: {text}")
-#                 except Exception as e:
-#                     print(f"❌ [HTTP_FAIL] {e}")
-
-#             # 7. CONTINUE WITH SIGNAL + CLEANUP
-#             try:
-#                 await self._send_end_signal()
-#             except Exception:
-#                 pass
-#             try:
-#                 self._end_signal_event.set()
-#             except Exception:
-#                 pass
-#             try:
-#                 asyncio.create_task(self._delayed_disconnect())
-#             except Exception:
-#                 pass
-
-#         except Exception as e:
-#             print(f"❌ [REAL_EVAL_FATAL] {e}")
-#             # Fallback to old placeholder logic
-#             try:
-#                 await self._send_end_signal()
-#             except Exception:
-#                 pass
 
 
     async def immediate_signal_and_db(self):
@@ -878,56 +552,6 @@ async def entrypoint(ctx: JobContext):
     print(f"📝 [PROMPT_PREP] Preparing AI Chris for problem: {full_question_data.get('title')}")
 
     assistant = InterviewAssistant(full_question_data, ctx.room, session_id=session_id)
-    # try:
-    #     # 1. Try to get the clean ID from Room Metadata first
-    #     session_id = None
-    #     if ctx.room.metadata:
-    #         try:
-    #             metadata = json.loads(ctx.room.metadata)
-    #             session_id = metadata.get("sessionId")
-    #             print(f"📋 [METADATA] Successfully parsed SessionId: {session_id}")
-    #         except json.JSONDecodeError:
-    #             print("⚠️ [METADATA] Failed to parse JSON metadata")
-
-    #     # 2. Fallback: If metadata is empty, strip the prefix from the room name
-    #     if not session_id:
-    #         session_id = ctx.room.name.replace("interview-", "")
-    #         print(f"✂️ [STRIP] Using stripped room name as ID: {session_id}")
-    #     # 2. DEBUG: Print exactly what we are looking for
-    #     print(f"🔍 [DB_QUERY] Searching for sessionId: '{session_id}' in collection: {sessions_collection.name}")
-    #     # 3. Query MongoDB for the specific session created by your backend
-    #     session_data = await loop.run_in_executor(
-    #         None, lambda: sessions_collection.find_one({"sessionId": session_id})
-    #     )
-
-    #     if session_data and "questionsAsked" in session_data:
-    #         # Fetch the actual question title chosen by your backend
-    #         question = session_data["questionsAsked"][0]
-    #         print(f"✅ [DYNAMIC_FETCH] Found question from backend: {question}")
-    #     else:
-    #         # If DB lookup still fails, log exactly what we searched for
-    #         print(f"❌ [DB_ERR] No session found in DB for ID: {session_id}")
-    #         question = "the assigned coding problem" # Neutral fallback
-
-    # except Exception as e:
-    #     print(f"⚠️ [FATAL_FETCH_ERROR] {e}")
-    #     question = "the coding exercise"
-    # try:
-    #     session_id = ctx.room.name
-    #     if ctx.room.metadata:
-    #         metadata = json.loads(ctx.room.metadata)
-    #         session_id = metadata.get("sessionId", session_id)
-
-    #     session_data = await loop.run_in_executor(
-    #         None, lambda: sessions_collection.find_one({"sessionId": session_id})
-    #     )
-    #     question = session_data.get("questionsAsked", ["Tell me about yourself"])[0] if session_data else "Hello!"
-    # except Exception as e:
-    #     print(f"⚠️ DB Error: {e}")
-    #     question = "Tell me about yourself."
-          
-    # assistant = InterviewAssistant(question, ctx.room, session_id=session_id)
-    # Session will be created next; attach it to the assistant after creation so it's defined
 
     session = AgentSession(
         vad=silero.VAD.load(),
@@ -985,45 +609,159 @@ async def entrypoint(ctx: JobContext):
         except Exception as e:
             print(f"❌ [DATA_PARSE_ERR] {e}")
 
-    # --- TEXT STREAM HANDLER (Replaces data_received) ---
-    
+    # ✅ NEW VERSION - Replace the ENTIRE function above
     async def handle_code_stream(reader: rtc.TextStreamReader, participant_identity: str):
-        """Process the incoming code stream exactly like audio STT."""
+        """Feed code directly to LLM - SIMPLIFIED & WORKING."""
         try:
-            # Wait for the complete code text from the stream
             code_content = await reader.read_all()
-            print(f"DEBUG: Received code content of type {type(code_content)}")
-            if code_content:
-            # SAFETY CHECK: Access the private _chat_ctx found in your logs
-                # ctx_obj = getattr(session, '_chat_ctx', None)
-                ctx_obj = getattr(session, '_chat_ctx', getattr(session, 'chat_ctx', None))
-                print(f"DEBUG: Retrieved chat_ctx: {ctx_obj is not None}")
-                print(f"DEBUG: chat_ctx type: {type(ctx_obj)}")
-                if ctx_obj:
-                    assistant.update_code_context(code_content, ctx_obj)
-                        # Avoid using removed `is_speaking` API. Prefer agent state tracking.
-                    agent_state = getattr(assistant, '_agent_state', None)
-                    if agent_state != 'speaking':
-                        print("🤖 [REPLY] Triggering AI thought process...")
-                        # call generate_reply non-blocking as before
-                        session.generate_reply()
-                    else:
-                        print("🔇 [SKIP_REPLY] Agent currently speaking; skipping generate_reply")
-                if ctx_obj is None:
-                    print("❌ [CRITICAL] Could not find _chat_ctx on session object")
-                    return
-            # if code_content:
-                # 1. Update the brain context
-            # assistant.update_code_context(code_content, ctx_obj)
-            print(f"📝 [CODE_UPDATE] Code received from {participant_identity}, length={len(code_content)}")
-            print(f"-----\n{code_content}\n-----")
-            print(f"📥 [CODE_SYNC] Code context updated in LLM history")
-                # 2. Trigger the LLM to generate a reply (mimics speech committed)
-            # asyncio.create_task(session.generate_reply())
-                
-            print(f"📄 [STREAM] Received code update from {participant_identity}")
+            print(f"🔍 [DEBUG_1] Code received: {len(code_content)} chars")
+            
+            # Store code for final evaluation
+            assistant.current_code = code_content
+            
+            # IMMEDIATELY trigger LLM with code as user message
+            code_msg = f"CANDIDATE CODE UPDATE:\n```js\n{code_content}\n```"
+            
+            # Use session's speech pipeline (bypasses all ChatContext issues)
+            await session.generate_reply()
+            print(f"✅ [LLM_DIRECT] Code injected to LLM via generate_reply")
+            
+            print(f"📝 [CODE_UPDATE] Code received ({len(code_content)} chars)")
+            
         except Exception as e:
-            print(f"⚠️ [STREAM_ERROR] {e}")
+            print(f"💥 [STREAM_ERROR] {e}")
+            assistant.current_code = code_content
+
+
+
+
+    # async def handle_code_stream(reader: rtc.TextStreamReader, participant_identity: str):
+    #     """Process the incoming code stream exactly like audio STT."""
+    #     try:
+    #         code_content = await reader.read_all()
+    #         print(f"🔍 [DEBUG_1] Received code: type=<class 'str'>, len={len(str(code_content))}")
+            
+    #         # FIXED: Use session._chat_ctx directly (we know it works from debug)
+    #         ctx_obj = getattr(session, '_chat_ctx', None)
+    #         print(f"✅ [CTX_FOUND] session._chat_ctx: {type(ctx_obj)} at {hex(id(ctx_obj))}")
+            
+    #         if ctx_obj and isinstance(ctx_obj, llm.ChatContext):
+    #             print(f"✅ [CTX_VALID] Calling update_code_context...")
+    #             assistant.update_code_context(str(code_content), ctx_obj)
+    #             print(f"✅ [CTX_SUCCESS] Code context updated!")
+                
+    #             # Trigger reply only if agent idle
+    #             agent_state = getattr(assistant, '_agent_state', None)
+    #             if agent_state != 'speaking':
+    #                 print("🤖 [REPLY] Triggering AI thought process...")
+    #                 session.generate_reply()
+    #             else:
+    #                 print("🔇 [SKIP_REPLY] Agent currently speaking")
+    #         else:
+    #             print(f"❌ [CTX_INVALID] session._chat_ctx is not ChatContext: {type(ctx_obj)}")
+                
+    #         print(f"📝 [CODE_UPDATE] Code received from {participant_identity}, length={len(code_content)}")
+    #         print(f"📥 [CODE_SYNC] Code context updated in LLM history")
+            
+    #     except Exception as e:
+    #         print(f"💥 [STREAM_ERROR] {type(e).__name__}: {e}")
+    #         import traceback
+    #         traceback.print_exc()
+
+
+    # --- TEXT STREAM HANDLER (Replaces data_received) ---
+    # async def handle_code_stream(reader: rtc.TextStreamReader, participant_identity: str):
+    #     """Process the incoming code stream exactly like audio STT."""
+    #     try:
+    #         code_content = await reader.read_all()
+    #         print(f"🔍 [DEBUG_1] Received code: type={type(code_content)}, len={len(str(code_content))}")
+            
+    #         # CRITICAL: Full session debug
+    #         print(f"🔍 [DEBUG_2] session attrs: {list(dir(session))[:20]}...")  # First 20 attrs
+    #         print(f"🔍 [DEBUG_3] session._session: {getattr(session, '_session', 'MISSING')}")
+    #         print(f"🔍 [DEBUG_4] assistant._session: {getattr(assistant, '_session', 'MISSING')}")
+            
+    #         # Test ALL possible chat_ctx locations
+    #         ctx_candidates = [
+    #             ('session.chat_ctx', getattr(session, 'chat_ctx', None)),
+    #             ('session._chat_ctx', getattr(session, '_chat_ctx', None)),
+    #             ('assistant._session.chat_ctx', getattr(assistant._session, 'chat_ctx', None) if hasattr(assistant, '_session') else None),
+    #             ('assistant._session._chat_ctx', getattr(getattr(assistant, '_session', None), '_chat_ctx', None)),
+    #         ]
+            
+    #         print("🔍 [DEBUG_5] ALL CTX CANDIDATES:")
+    #         for name, ctx in ctx_candidates:
+    #             print(f"  {name}: {type(ctx)} = {ctx}")
+    #             if ctx and hasattr(ctx, 'messages'):
+    #                 print(f"    → HAS MESSAGES: {len(getattr(ctx, 'messages', []))}")
+    #             elif ctx is True:
+    #                 print(f"    → !!! BOOLEAN TRUE BUG DETECTED !!!")
+            
+    #         # Try the first VALID ChatContext (not boolean)
+    #         ctx_obj = None
+    #         for name, ctx in ctx_candidates:
+    #             if ctx and not isinstance(ctx, bool) and hasattr(ctx, 'messages'):
+    #                 ctx_obj = ctx
+    #                 print(f"✅ [DEBUG_6] USING: {name}")
+    #                 break
+            
+    #         if not ctx_obj:
+    #             print("❌ [CRITICAL] NO VALID ChatContext found!")
+    #             return
+                
+    #         print(f"🔍 [DEBUG_7] Target ctx_obj: {type(ctx_obj)}, id={id(ctx_obj)}")
+    #         print(f"🔍 [DEBUG_8] ctx_obj.messages exists: {hasattr(ctx_obj, 'messages')}")
+    #         if hasattr(ctx_obj, 'messages'):
+    #             print(f"🔍 [DEBUG_9] messages len: {len(ctx_obj.messages)}")
+    #             print(f"🔍 [DEBUG_10] messages[0]: {getattr(ctx_obj.messages[0], 'role', 'NO_ROLE')}")
+            
+    #         # NOW test the update_code_context call
+    #         print("🔍 [DEBUG_11] Calling update_code_context...")
+    #         assistant.update_code_context(str(code_content), ctx_obj)
+    #         print("✅ [DEBUG_12] update_code_context returned successfully")
+            
+    #     except Exception as e:
+    #         print(f"💥 [FATAL_STREAM_ERROR] {type(e).__name__}: {e}")
+    #         import traceback
+    #         traceback.print_exc()
+
+    # async def handle_code_stream(reader: rtc.TextStreamReader, participant_identity: str):
+    #     """Process the incoming code stream exactly like audio STT."""
+    #     try:
+    #         # Wait for the complete code text from the stream
+    #         code_content = await reader.read_all()
+    #         print(f"DEBUG: Received code content of type {type(code_content)}")
+    #         if code_content:
+    #         # SAFETY CHECK: Access the private _chat_ctx found in your logs
+    #             # ctx_obj = getattr(session, '_chat_ctx', None)
+    #             ctx_obj = getattr(session, '_chat_ctx', getattr(session, 'chat_ctx', None))
+    #             print(f"DEBUG: Retrieved chat_ctx: {ctx_obj is not None}")
+    #             print(f"DEBUG: chat_ctx type: {type(ctx_obj)}")
+    #             if ctx_obj:
+    #                 assistant.update_code_context(code_content, ctx_obj)
+    #                     # Avoid using removed `is_speaking` API. Prefer agent state tracking.
+    #                 agent_state = getattr(assistant, '_agent_state', None)
+    #                 if agent_state != 'speaking':
+    #                     print("🤖 [REPLY] Triggering AI thought process...")
+    #                     # call generate_reply non-blocking as before
+    #                     session.generate_reply()
+    #                 else:
+    #                     print("🔇 [SKIP_REPLY] Agent currently speaking; skipping generate_reply")
+    #             if ctx_obj is None:
+    #                 print("❌ [CRITICAL] Could not find _chat_ctx on session object")
+    #                 return
+    #         # if code_content:
+    #             # 1. Update the brain context
+    #         # assistant.update_code_context(code_content, ctx_obj)
+    #         print(f"📝 [CODE_UPDATE] Code received from {participant_identity}, length={len(code_content)}")
+    #         print(f"-----\n{code_content}\n-----")
+    #         print(f"📥 [CODE_SYNC] Code context updated in LLM history")
+    #             # 2. Trigger the LLM to generate a reply (mimics speech committed)
+    #         # asyncio.create_task(session.generate_reply())
+                
+    #         print(f"📄 [STREAM] Received code update from {participant_identity}")
+    #     except Exception as e:
+    #         print(f"⚠️ [STREAM_ERROR] {e}")
 
     def stream_callback(reader, participant_identity):
         """Wrapper to bridge sync callback to async handler."""
