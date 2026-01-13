@@ -133,7 +133,7 @@ class InterviewAssistant(Agent):
                 
                 # CODE EDITOR RULES (MANDATORY)
                 - You have access to a tool `get_latest_code`.
-                - **Explicit Request**: If candidate asks "How does this look?" or "Review my code", call `get_latest_code`.
+                - **Explicit Request**: If candidate asks "How does this look?" or "Review my code", call `get_latest_code`,`analyze my code`, `I have written code in editor check it`.
                 - **Rule**: If you check the code and find they haven't written anything new or are just starting, stay silent or give a tiny verbal nudge without mentioning the editor.
                 - **Rule**: Only give detailed feedback if you see a logical block or an error in the editor.
                 
@@ -153,7 +153,9 @@ class InterviewAssistant(Agent):
                 """
         )
 
-    @llm.function_tool
+    @llm.function_tool(
+        description="Retrieves the candidate's current code from the editor."
+    )
     async def get_latest_code(self, force_refresh: bool = False) -> str:
         """Get candidate's latest code. Use force_refresh=True to recheck editor.
         Call when candidate says 'check my code', 'what do you think?', etc."""
@@ -633,7 +635,8 @@ async def entrypoint(ctx: JobContext):
     session = AgentSession(
         vad=silero.VAD.load(),
         stt=deepgram.STT(model="nova-2"),
-        llm=groq.LLM(model="llama-3.1-8b-instant"),
+        # llm=groq.LLM(model="llama-3.1-8b-instant"),
+        llm=groq.LLM(model="llama-3.3-70b-versatile"),
         tts=deepgram.TTS(
             model="aura-asteria-en",
             api_key=os.getenv("DEEPGRAM_API_KEY")
