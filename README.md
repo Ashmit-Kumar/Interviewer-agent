@@ -1,4 +1,4 @@
-# Interview Platform — Readme
+# AssessAI
 
 This repository is a monorepo for an AI-powered interview practice platform. It contains a Next.js frontend, an Express + TypeScript backend, and a Python LiveKit-based voice agent.
 
