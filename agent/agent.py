@@ -109,7 +109,7 @@ class InterviewAssistant(Agent):
             desc = inp = out = ""
         super().__init__(
             instructions=f"""# Role
-                You are Chris, a professional Technical Interviewer. You are conducting a structured coding interview.
+                You are Athena, a professional Technical Interviewer. You are conducting a structured coding interview.
                 
                 # The Problem to Discuss
                 Title: {title}
@@ -628,7 +628,7 @@ async def entrypoint(ctx: JobContext):
             "exampleOutput": "the expected output",
         }
 
-    print(f"📝 [PROMPT_PREP] Preparing AI Chris for problem: {full_question_data.get('title')}")
+    print(f"📝 [PROMPT_PREP] Preparing AI Athena for problem: {full_question_data.get('title')}")
 
     assistant = InterviewAssistant(full_question_data, ctx.room, session_id=session_id)
 
@@ -656,7 +656,7 @@ async def entrypoint(ctx: JobContext):
     @session.on("agent_speech_committed")
     def on_agent_speech_committed(msg: llm.ChatMessage):
         """
-        This event triggers whenever Chris finishes generating a sentence.
+        This event triggers whenever Athena finishes generating a sentence.
         It is the most reliable way to send transcripts to the frontend.
         """
         content = msg.content
@@ -750,7 +750,7 @@ async def entrypoint(ctx: JobContext):
 
 
     # async def handle_code_stream(reader: rtc.TextStreamReader, participant_identity: str):
-    #     """Send code as FAKE audio transcript so Chris 'hears' it."""
+    #     """Send code as FAKE audio transcript so Athena 'hears' it."""
     #     try:
     #         code_content = await reader.read_all()
     #         print(f"🔍 [DEBUG_1] Code received: {len(code_content)} chars")
@@ -960,7 +960,7 @@ async def entrypoint(ctx: JobContext):
     
     # Initial Greeting
     await session.generate_reply(
-        instructions=f"Introduce yourself as Chris and askk candidate weather he is ready to discuss the problem '{full_question_data.get('title')}'."
+        instructions=f"Introduce yourself as Athena and askk candidate weather he is ready to discuss the problem '{full_question_data.get('title')}'."
     )
 
     while True:
